@@ -3,7 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from torchmetrics import Accuracy, MeanAbsoluteError
-
+from torchmetrics import (
+    Precision,
+    Recall,
+    F1Score
+)
 class AttentionGatingModule(nn.Module):
     def __init__(self, feature_dim):
         super(AttentionGatingModule, self).__init__()
@@ -90,7 +94,12 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.val_classification_accuracy = Accuracy(task='multiclass', num_classes=num_classes)
         self.test_classification_accuracy = Accuracy(task='multiclass', num_classes=num_classes)
         self.mmse_mae = MeanAbsoluteError()
-        
+        # Metrics cho classification
+        self.test_classification_accuracy = Accuracy(task='multiclass', num_classes=num_classes)
+        self.test_precision = Precision(task='multiclass', num_classes=num_classes, average='macro')
+        self.test_recall = Recall(task='multiclass', num_classes=num_classes, average='macro')
+        self.test_f1 = F1Score(task='multiclass', num_classes=num_classes, average='macro')
+    
         # Losses
         self.classification_loss = nn.CrossEntropyLoss()
         self.regression_loss = nn.MSELoss()
@@ -200,6 +209,36 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         
         return total_loss
     
+    # def test_step(self, batch, batch_idx):
+    #     # Unpack batch
+    #     images = batch['image']
+    #     labels = batch['label']
+    #     mmse = batch['mmse']
+    #     age = batch['age']
+    #     gender = batch['gender']
+    
+    #     # Chuyển đổi sang Tensor nếu cần
+    #     mmse = torch.tensor(float(mmse)) if not isinstance(mmse, torch.Tensor) else mmse
+    #     age = torch.tensor(float(age)) if not isinstance(age, torch.Tensor) else age
+    #     gender = torch.tensor(float(gender)) if not isinstance(gender, torch.Tensor) else gender
+        
+    #     # Prepare metadata
+    #     metadata = torch.stack([mmse, age, gender], dim=1).float()
+        
+    #     # Forward pass
+    #     classification_output, regression_output = self(images, metadata)
+        
+    #     # Classification metrics
+    #     preds = torch.argmax(classification_output, dim=1)
+    #     acc = (preds == labels).float().mean()
+        
+    #     # Regression metrics
+    #     mae = F.l1_loss(regression_output.squeeze(), mmse)
+        
+    #     self.log('test_classification_acc', acc, on_epoch=True, prog_bar=True)
+    #     self.log('test_regression_mae', mae, on_epoch=True, prog_bar=True)
+        
+    #     return {'preds': preds, 'true_labels': labels}
     def test_step(self, batch, batch_idx):
         # Unpack batch
         images = batch['image']
@@ -221,15 +260,48 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         
         # Classification metrics
         preds = torch.argmax(classification_output, dim=1)
-        acc = (preds == labels).float().mean()
         
-        # Regression metrics
+        # Classification loss
+        classification_loss = self.classification_loss(classification_output, labels)
+        
+        # Regression loss and metrics
+        regression_loss = self.regression_loss(regression_output.squeeze(), mmse)
         mae = F.l1_loss(regression_output.squeeze(), mmse)
         
-        self.log('test_classification_acc', acc, on_epoch=True, prog_bar=True)
-        self.log('test_regression_mae', mae, on_epoch=True, prog_bar=True)
+        # Calculate additional classification metrics
+        accuracy = self.test_classification_accuracy(preds, labels)
+        precision = self.test_precision(preds, labels)
+        recall = self.test_recall(preds, labels)
+        f1 = self.test_f1(preds, labels)
         
-        return {'preds': preds, 'true_labels': labels}
+        # Total loss
+        total_loss = classification_loss + 0.5 * regression_loss
+        
+        # Log all metrics
+        self.log('test_total_loss', total_loss, on_epoch=True)
+        self.log('test_classification_loss', classification_loss, on_epoch=True)
+        self.log('test_regression_loss', regression_loss, on_epoch=True)
+        self.log('test_classification_acc', accuracy, on_epoch=True)
+        self.log('test_precision', precision, on_epoch=True)
+        self.log('test_recall', recall, on_epoch=True)
+        self.log('test_f1', f1, on_epoch=True)
+        self.log('test_regression_mae', mae, on_epoch=True)
+        
+        # Return dictionary with all metrics for later analysis
+        return {
+            'preds': preds,
+            'true_labels': labels,
+            'total_loss': total_loss,
+            'classification_loss': classification_loss,
+            'regression_loss': regression_loss,
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'mae': mae,
+            'mmse_pred': regression_output.squeeze().detach(),
+            'mmse_true': mmse
+        }
     
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)

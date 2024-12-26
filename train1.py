@@ -2,10 +2,15 @@ import torch
 import numpy as np
 import random
 from multitask.multitaskdataset import MultitaskAlzheimerDataset
-from multitask.model_v1 import MultiTaskAlzheimerModel
+# from multitask.model_v1 import MultiTaskAlzheimerModel
 # from multitask.model import MultiTaskAlzheimerModel
-from multitask.KKT import MultiTaskAlzheimerModel
-# from multitask.modeleff import MultiTaskAlzheimerModel
+# from multitask.KKT import MultiTaskAlzheimerModel
+# from multitask.crosseff import MultiTaskAlzheimerModel
+# from multitask.frankwolfe import MultiTaskAlzheimerModel
+# from multitask.resnet_original import MultiTaskAlzheimerModel
+# from multitask.resnet18 import MultiTaskAlzheimerModel
+# from multitask.resnet_frank import MultiTaskAlzheimerModel
+from multitask.frank_1 import MultiTaskAlzheimerModel
 import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -37,6 +42,8 @@ class CustomDataset:
         mmse = torch.tensor(float(metadata['mmse']), dtype=torch.float32)
         age = torch.tensor(float(metadata['age']), dtype=torch.float32)
         gender = torch.tensor(float(metadata['gender']), dtype=torch.float32)
+        # if (label==2):
+        #     label=label-1
         return {
             'image': image,
             'label': label,
@@ -61,11 +68,11 @@ def main():
     print('AD: ',len(ad))
     print('CN: ',len(cn))
     # dataset_list = ad3y + mci3y + cn3y + ad1y + cn2y
-    dataset_list = ad + cn
+    dataset_list = cn + ad
     # dataset_list = dataset_list + mci3y  
     dataset=CustomDataset(dataset_list)
     # =====================================================
-    batch_size = 32
+    batch_size = 24
     max_epochs = 100
     num_classes = 2
     input_shape = (1, 64, 64, 64) 

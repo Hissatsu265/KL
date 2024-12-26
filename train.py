@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import random
 from multitask.multitaskdataset import MultitaskAlzheimerDataset
-from multitask.model_v1 import MultiTaskAlzheimerModel
+# from multitask.model_v1 import MultiTaskAlzheimerModel
 # from multitask.model import MultiTaskAlzheimerModel
 # from multitask.frankwolfe import MultiTaskAlzheimerModel
 # from multitask.crosseff import MultiTaskAlzheimerModel
@@ -37,6 +37,9 @@ class CustomDataset:
         mmse = torch.tensor(float(metadata['mmse']), dtype=torch.float32)
         age = torch.tensor(float(metadata['age']), dtype=torch.float32)
         gender = torch.tensor(float(metadata['gender']), dtype=torch.float32)
+
+        # if (label==2):
+        #     label=label-1
         return {
             'image': image,
             'label': label,
@@ -61,13 +64,13 @@ def main():
     print('AD: ',len(ad))
     print('CN: ',len(cn))
     # dataset_list = ad3y + mci3y + cn3y + ad1y + cn2y
-    dataset_list = ad +cn
+    dataset_list = ad+cn +mci3y
     # dataset_list = dataset_list + mci3y  
     dataset=CustomDataset(dataset_list)
     # =====================================================
     batch_size = 32
     max_epochs = 100
-    num_classes = 2
+    num_classes = 3
     input_shape = (1, 64, 64, 64) 
     
     train_size = int(0.7 * len(dataset))
@@ -80,7 +83,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=batch_size,num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=batch_size,num_workers=4)
     print('==================================')
-    model = MultiTaskAlzheimerModel(num_classes=2)
+    model = MultiTaskAlzheimerModel(num_classes=num_classes)
     checkpoint_callback = ModelCheckpoint(
         monitor='val_classification_acc',
         dirpath='checkpoints/',

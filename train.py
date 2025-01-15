@@ -6,6 +6,8 @@ from multitask.multitaskdataset import MultitaskAlzheimerDataset
 # from multitask.model import MultiTaskAlzheimerModel
 # from multitask.frankwolfe import MultiTaskAlzheimerModel
 # from multitask.crosseff import MultiTaskAlzheimerModel
+from multitask.pcgrad import MultiTaskAlzheimerModel
+
 import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -64,13 +66,13 @@ def main():
     print('AD: ',len(ad))
     print('CN: ',len(cn))
     # dataset_list = ad3y + mci3y + cn3y + ad1y + cn2y
-    dataset_list = ad+cn +mci3y
+    dataset_list = ad+cn 
     # dataset_list = dataset_list + mci3y  
     dataset=CustomDataset(dataset_list)
     # =====================================================
     batch_size = 32
     max_epochs = 100
-    num_classes = 3
+    num_classes = 2
     input_shape = (1, 64, 64, 64) 
     
     train_size = int(0.7 * len(dataset))
@@ -93,7 +95,7 @@ def main():
     )
     
     early_stop_callback = EarlyStopping(
-        monitor='val_loss',
+        monitor='train_total_loss',
         min_delta=0.00,
         patience=20,
         verbose=True,
@@ -106,12 +108,13 @@ def main():
         max_epochs=max_epochs,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         # accelerator='cpu'
-        # devices=[1],  
-        devices=2,
-        strategy='ddp',
+        devices=[0],  
+        # devices=2,
+        # strategy='ddp',
         callbacks=[checkpoint_callback, early_stop_callback],
         # logger=logger,
-        deterministic=False
+        deterministic=False,
+        precision=16
     )
     # Training
     trainer.fit(

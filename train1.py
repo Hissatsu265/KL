@@ -10,8 +10,13 @@ from multitask.multitaskdataset import MultitaskAlzheimerDataset
 # from multitask.resnet_original import MultiTaskAlzheimerModel
 # from multitask.resnet18 import MultiTaskAlzheimerModel
 # from multitask.resnet_frank import MultiTaskAlzheimerModel
-from multitask.frank_1 import MultiTaskAlzheimerModel
-import torch.nn.functional as F
+from multitask.resnet.frankwolfe_update import MultiTaskAlzheimerModel
+from multitask.resnet.extra import MultiTaskAlzheimerModel
+# from multitask.frank_1 import MultiTaskAlzheimerModel
+# from multitask.frank1_3_2025 import MultiTaskAlzheimerModel
+
+# from multitask.KKT_1 import MultiTaskAlzheimerModel
+# import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader, random_split
 import pytorch_lightning as pl
@@ -42,8 +47,8 @@ class CustomDataset:
         mmse = torch.tensor(float(metadata['mmse']), dtype=torch.float32)
         age = torch.tensor(float(metadata['age']), dtype=torch.float32)
         gender = torch.tensor(float(metadata['gender']), dtype=torch.float32)
-        # if (label==2):
-        #     label=label-1
+        if (label==2):
+            label=label-1
         return {
             'image': image,
             'label': label,
@@ -68,11 +73,11 @@ def main():
     print('AD: ',len(ad))
     print('CN: ',len(cn))
     # dataset_list = ad3y + mci3y + cn3y + ad1y + cn2y
-    dataset_list = cn + ad
+    dataset_list =ad+mci3y
     # dataset_list = dataset_list + mci3y  
     dataset=CustomDataset(dataset_list)
     # =====================================================
-    batch_size = 24
+    batch_size = 16
     max_epochs = 100
     num_classes = 2
     input_shape = (1, 64, 64, 64) 
@@ -89,11 +94,11 @@ def main():
     print('==================================')
     model = MultiTaskAlzheimerModel(num_classes=2)
     checkpoint_callback = ModelCheckpoint(
-        monitor='val_classification_acc',
+        monitor='val_loss',
         dirpath='checkpoints/',
         filename='alzheimer-{epoch:02d}-{val_acc:.2f}',
         save_top_k=3,
-        mode='max'
+        mode='min'
     )
     
     early_stop_callback = EarlyStopping(

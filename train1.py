@@ -10,8 +10,10 @@ from multitask.multitaskdataset import MultitaskAlzheimerDataset
 # from multitask.resnet_original import MultiTaskAlzheimerModel
 # from multitask.resnet18 import MultiTaskAlzheimerModel
 # from multitask.resnet_frank import MultiTaskAlzheimerModel
-from multitask.resnet.frankwolfe_update import MultiTaskAlzheimerModel
+# from multitask.resnet.frankwolfe_update import MultiTaskAlzheimerModel
 from multitask.resnet.extra import MultiTaskAlzheimerModel
+from multitask.resnet.proposefrank import MultiTaskAlzheimerModel
+from multitask.resnet.nguyenban import MultiTaskAlzheimerModel
 # from multitask.frank_1 import MultiTaskAlzheimerModel
 # from multitask.frank1_3_2025 import MultiTaskAlzheimerModel
 
@@ -47,10 +49,11 @@ class CustomDataset:
         mmse = torch.tensor(float(metadata['mmse']), dtype=torch.float32)
         age = torch.tensor(float(metadata['age']), dtype=torch.float32)
         gender = torch.tensor(float(metadata['gender']), dtype=torch.float32)
-        if (label==2):
-            label=label-1
+        # if (label==2):
+        #     label=label-1
         return {
             'image': image,
+            # 'label': label-1,
             'label': label,
             'mmse': mmse,
             'age': age,
@@ -73,7 +76,7 @@ def main():
     print('AD: ',len(ad))
     print('CN: ',len(cn))
     # dataset_list = ad3y + mci3y + cn3y + ad1y + cn2y
-    dataset_list =ad+mci3y
+    dataset_list =ad+cn
     # dataset_list = dataset_list + mci3y  
     dataset=CustomDataset(dataset_list)
     # =====================================================
@@ -104,7 +107,7 @@ def main():
     early_stop_callback = EarlyStopping(
         monitor='val_loss',
         min_delta=0.00,
-        patience=20,
+        patience=10,
         verbose=True,
         mode='min'
     )

@@ -5,6 +5,15 @@ import pytorch_lightning as pl
 from torchmetrics import Accuracy, MeanAbsoluteError
 from torchvision.models.video import r3d_18, R3D_18_Weights
 
+from multitask.visualize.visualize import visualize_and_save_gradcam,plot_and_save_optimization_metrics
+import os
+from typing import List
+# from torchmetrics import RootMeanSquaredError
+from torchmetrics.classification import BinarySpecificity, BinaryRecall
+from torchmetrics.classification import MulticlassSpecificity, MulticlassRecall
+def rmse_tt(predictions, targets):
+        mse = F.mse_loss(predictions, targets)
+        return torch.sqrt(mse)
 class GradNormOptimizer:
     def __init__(self, model, num_tasks=2, alpha=1.5):
         self.model = model
@@ -196,10 +205,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             self.backbone = r3d_18(weights=R3D_18_Weights.DEFAULT)
         else:
             self.backbone = r3d_18(weights=None)
-        # self.backbone.train()
-        # for module in self.backbone.modules():
-        #     if isinstance(module, nn.Module):
-        #         module.gradient_checkpointing_enable()
+
         self.backbone.stem[0] = nn.Conv3d(
             input_shape[0], 64, 
             kernel_size=(3, 7, 7), 
@@ -272,15 +278,20 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.val_classification_accuracy = Accuracy(task='multiclass', num_classes=num_classes)
         self.test_classification_accuracy = Accuracy(task='multiclass', num_classes=num_classes)
         self.mmse_mae = MeanAbsoluteError()
-        
-        # Losses
+ 
         self.classification_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
         self.regression_loss = nn.HuberLoss()
         self.multi_task_optimizer = CombinedOptimizer(self, num_tasks=2, 
                                             frank_wolfe_weight=0.4,  
                                             alpha=1.5)
-        
-        # Loss history
+
+        if num_classes>2:
+            self.specificity = MulticlassSpecificity(num_classes=num_classes)
+            self.sensitivity = MulticlassRecall(num_classes=num_classes)
+        else:
+            self.specificity = BinarySpecificity()  # For binary classification
+            self.sensitivity = BinaryRecall()
+ 
         self.loss_history = {
             'classification': [],
             'regression': [],
@@ -289,7 +300,6 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self._init_weights()
     
     def _init_weights(self):
-        """Initialize weights using Xavier/Kaiming initialization"""
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -300,7 +310,6 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
                 nn.init.constant_(m.bias, 0)
 
     def on_fit_start(self):
-        """Called when training begins"""
         self.multi_task_optimizer.to(self.device)
 
     def forward(self, image, metadata):
@@ -361,6 +370,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.loss_history['regression'].append(regression_loss.item())
         self.loss_history['weights'].append(weights.tolist())
         
+
         return total_loss
 
     def validation_step(self, batch, batch_idx):
@@ -407,24 +417,46 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         preds = torch.argmax(classification_output, dim=1)
         acc = (preds == label).float().mean()
         mae = F.l1_loss(regression_output.squeeze(), mmse)
+        rmse = rmse_tt(regression_output.squeeze(), mmse)
+        spec = self.specificity(preds, label)
+        sens = self.sensitivity(preds, label)
         
-        # Detailed metrics logging
         self.log('test_total_loss', total_loss, on_epoch=True)
         self.log('test_classification_loss', classification_loss, on_epoch=True)
         self.log('test_regression_loss', regression_loss, on_epoch=True)
         self.log('test_classification_acc', acc, on_epoch=True, prog_bar=True)
         self.log('test_regression_mae', mae, on_epoch=True, prog_bar=True)
+        self.log('test_regression_rmse', rmse, on_epoch=True, prog_bar=True)
         self.log('final_classification_weight', weights[0], on_epoch=True)
         self.log('final_regression_weight', weights[1], on_epoch=True)
+        
+        self.log('test_specificity', spec, on_epoch=True, prog_bar=True)
+        self.log('test_sensitivity', sens, on_epoch=True, prog_bar=True)
+        
+        self.loss_history['classification'].append(classification_loss.item())
+        self.loss_history['regression'].append(regression_loss.item())
+        self.loss_history['weights'].append(weights.tolist())
+
         
         return {
             'preds': preds,
             'true_labels': label,
             'predicted_mmse': regression_output.squeeze(),
             'true_mmse': mmse,
-            'final_weights': weights.cpu()
+            'final_weights': weights.cpu(),
+            'specificity': spec,
+            'sensitivity': sens
         }
-
+    def on_test_end(self):
+        save_path = '/home/jupyter-iec_iot13_toanlm/multitask/visualize'
+        os.makedirs(save_path, exist_ok=True)
+        
+        if hasattr(self, 'sample_images'):
+            image = self.sample_images[0]  
+            visualize_and_save_gradcam(self, image, save_path, num_slices=4)
+        
+        
+        plot_and_save_optimization_metrics(self, save_path)
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -440,3 +472,5 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
                 'monitor': 'val_loss'
             }
         }
+# ==============================================================================
+   

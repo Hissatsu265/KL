@@ -278,28 +278,25 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.val_classification_accuracy = Accuracy(task='multiclass', num_classes=num_classes)
         self.test_classification_accuracy = Accuracy(task='multiclass', num_classes=num_classes)
         self.mmse_mae = MeanAbsoluteError()
-        # self.mmse_rmse = RootMeanSquaredError()
-        # Losses
+ 
         self.classification_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
         self.regression_loss = nn.HuberLoss()
         self.multi_task_optimizer = CombinedOptimizer(self, num_tasks=2, 
                                             frank_wolfe_weight=0.4,  
                                             alpha=1.5)
-        # self.specificity = Specificity(task='multiclass', num_classes=num_classes)
-        # self.sensitivity = Sensitivity(task='multiclass', num_classes=num_classes)
+
         if num_classes>2:
             self.specificity = MulticlassSpecificity(num_classes=num_classes)
             self.sensitivity = MulticlassRecall(num_classes=num_classes)
         else:
             self.specificity = BinarySpecificity()  # For binary classification
             self.sensitivity = BinaryRecall()
-        # Loss history
+ 
         self.loss_history = {
             'classification': [],
             'regression': [],
             'weights': []
         }
-        
         self._init_weights()
     
     def _init_weights(self):
@@ -373,6 +370,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.loss_history['regression'].append(regression_loss.item())
         self.loss_history['weights'].append(weights.tolist())
         
+
         return total_loss
 
     def validation_step(self, batch, batch_idx):
@@ -439,7 +437,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.loss_history['regression'].append(regression_loss.item())
         self.loss_history['weights'].append(weights.tolist())
 
-            
+        
         return {
             'preds': preds,
             'true_labels': label,
@@ -474,3 +472,5 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
                 'monitor': 'val_loss'
             }
         }
+# ==============================================================================
+   

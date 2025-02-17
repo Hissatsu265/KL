@@ -5,13 +5,92 @@ import pytorch_lightning as pl
 from torchmetrics import Accuracy, MeanAbsoluteError
 from torchvision.models.video import r3d_18, R3D_18_Weights
 
-from torchmetrics import Specificity, Sensitivity
+class GradNormOptimizer:
+    def __init__(self, model, num_tasks=2, alpha=1.5):
+        self.model = model
+        self.num_tasks = num_tasks
+        self.alpha = alpha
+        self.initial_losses = None
+        self.task_weights = nn.Parameter(torch.ones(num_tasks, requires_grad=True))
+        self.weights_optimizer = torch.optim.Adam([self.task_weights], lr=0.025)
+        
+    def to(self, device):
+        self.task_weights = self.task_weights.to(device)
+        return self
+        
+    def compute_grad_norm_loss(self, losses, shared_params):
+        if self.initial_losses is None:
+            self.initial_losses = [loss.item() for loss in losses]
+            
+        L_ratio = torch.stack([loss / init_loss for loss, init_loss 
+                             in zip(losses, self.initial_losses)])
+        L_mean = torch.mean(L_ratio)
+        r_weights = L_ratio / L_mean
+        
+        # Get weighted grad norms for each task
+        grad_norms = []
+        for i, loss in enumerate(losses):
+            grads = torch.autograd.grad(loss, shared_params, retain_graph=True)
+            grad_norm = torch.norm(torch.stack([g.norm() for g in grads]))
+            grad_norms.append(grad_norm)
+        
+        grad_norms = torch.stack(grad_norms)
+        mean_norm = torch.mean(grad_norms)
+        
+        target_grad_norm = grad_norms * (r_weights ** self.alpha)
+        gradnorm_loss = torch.sum(torch.abs(grad_norms - target_grad_norm))
+        
+        return gradnorm_loss
+        
+    def update_weights(self, losses, shared_params):
+        gradnorm_loss = self.compute_grad_norm_loss(losses, shared_params)
+        
+        self.weights_optimizer.zero_grad()
+        gradnorm_loss.backward(retain_graph=True)  # Add retain_graph=True
+        self.weights_optimizer.step()
+        
+        normalized_weights = F.softmax(self.task_weights, dim=0)
+        return normalized_weights
+
+class CombinedOptimizer:
+    def __init__(self, model, num_tasks=2, frank_wolfe_weight=0.5, alpha=1.5):
+        self.frank_wolfe = FrankWolfeOptimizer(num_tasks)
+        self.gradnorm = GradNormOptimizer(model, num_tasks, alpha)
+        self.frank_wolfe_weight = frank_wolfe_weight
+        self.weights = torch.ones(num_tasks) / num_tasks
+        self.device = None
+        
+    def to(self, device):
+        self.device = device
+        self.frank_wolfe.to(device)
+        self.gradnorm.to(device)
+        self.weights = self.weights.to(device)
+        return self
+        
+    def update_weights(self, losses, shared_params):
+        # Compute GradNorm weights first with retain_graph=True
+        gn_weights = self.gradnorm.update_weights(losses, shared_params)
+        
+        # Then compute Frank-Wolfe weights
+        fw_weights = self.frank_wolfe.update_weights(losses)
+        
+        # Combine weights
+        combined_weights = (self.frank_wolfe_weight * fw_weights + 
+                          (1 - self.frank_wolfe_weight) * gn_weights)
+        
+        # Extra weight for regression task
+        # combined_weights[1] *= 1.2
+        
+        # self.weights = F.softmax(combined_weights, dim=0)    
+        self.weights = combined_weights
+        return self.weights
 class FrankWolfeOptimizer:
     def __init__(self, num_tasks=2, max_iter=10):
         self.num_tasks = num_tasks
         self.max_iter = max_iter
         self.weights = None
         self.device = None
+        self.iteration = 0
         
     def to(self, device):
         self.device = device
@@ -21,11 +100,16 @@ class FrankWolfeOptimizer:
             self.weights = self.weights.to(device)
         return self
         
-    def compute_gradient(self, losses, prev_weights):
-        current_grads = torch.stack([loss.detach() for loss in losses])
-        return 0.9 * current_grads + 0.1 * prev_weights
+    def compute_gradient(self, losses):
+        # Original gradient computation - just use the loss values directly
+        return torch.stack([loss.detach() for loss in losses])
+    
+    def compute_gamma(self):
+        # Original step size rule: γ = 2/(t+2)
+        return 2.0 / (self.iteration + 2)
     
     def solve_linear_problem(self, gradients):
+        # Find the vertex that minimizes the inner product with the gradient
         min_idx = torch.argmin(gradients)
         s = torch.zeros_like(self.weights, device=self.device)
         s[min_idx] = 1.0
@@ -36,16 +120,22 @@ class FrankWolfeOptimizer:
             self.device = losses[0].device
             self.weights = (torch.ones(self.num_tasks) / self.num_tasks).to(self.device)
             
-        prev_weights = self.weights.clone()
-        gradients = self.compute_gradient(losses, prev_weights)
+        # Compute gradient
+        gradients = self.compute_gradient(losses)
+        
+        # Solve linear problem
         s = self.solve_linear_problem(gradients)
         
-        # Dynamic gamma scheduling
-        iteration = len(self.loss_history) if hasattr(self, 'loss_history') else 0
-        gamma = min(1.0, 2.0 / (iteration + 2))
+        # Compute step size
+        gamma = self.compute_gamma()
         
+        # Update weights using standard Frank-Wolfe update
         self.weights = (1 - gamma) * self.weights + gamma * s
+        
+        # Normalize weights to ensure they sum to 1
         self.weights = F.softmax(self.weights, dim=0)
+        
+        self.iteration += 1
         
         return self.weights
 
@@ -173,10 +263,10 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         # Losses
         self.classification_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
         self.regression_loss = nn.HuberLoss()
-        self.multi_task_optimizer = FrankWolfeOptimizer(num_tasks=num_classes)
+        self.multi_task_optimizer = CombinedOptimizer(self, num_tasks=2, 
+                                            frank_wolfe_weight=0.4,  
+                                            alpha=1.5)
         
-        self.specificity = Specificity(task='multiclass', num_classes=num_classes)
-        self.sensitivity = Sensitivity(task='multiclass', num_classes=num_classes)
         # Loss history
         self.loss_history = {
             'classification': [],
@@ -232,14 +322,19 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         classification_loss = self.classification_loss(classification_output, label)
         regression_loss = self.regression_loss(regression_output.squeeze(), mmse)
         
+        shared_params = list(self.shared_representation.parameters())
+    
         losses = [classification_loss.to(self.device), regression_loss.to(self.device)]
-        weights = self.multi_task_optimizer.update_weights(losses)
+        weights = self.multi_task_optimizer.update_weights(losses, shared_params)
+        
+        # losses = [classification_loss.to(self.device), regression_loss.to(self.device)]
+        # weights = self.multi_task_optimizer.update_weights(losses)
         
         total_loss = torch.sum(torch.stack(losses) * weights)
         
         preds = torch.argmax(classification_output, dim=1)
         acc = (preds == label).float().mean()
-       
+        
         # Logging
         self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log('train_classification_loss', classification_loss, on_step=True, on_epoch=True)
@@ -265,7 +360,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         regression_loss = self.regression_loss(regression_output.squeeze(), mmse)
         
         losses = [classification_loss.to(self.device), regression_loss.to(self.device)]
-        weights = self.multi_task_optimizer.weights
+        weights = self.multi_task_optimizer.weights  # Now this will work
         
         total_loss = torch.sum(torch.stack(losses) * weights)
         
@@ -291,15 +386,16 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         classification_loss = self.classification_loss(classification_output, label).to(self.device)
         regression_loss = self.regression_loss(regression_output.squeeze(), mmse).to(self.device)
         
-        weights = self.multi_task_optimizer.weights
+        # weights = self.multi_task_optimizer.weights
+        # total_loss = torch.sum(torch.stack([classification_loss, regression_loss]) * weights)
+        weights = self.multi_task_optimizer.weights  # Now this will work
         total_loss = torch.sum(torch.stack([classification_loss, regression_loss]) * weights)
-        
+    
         preds = torch.argmax(classification_output, dim=1)
         acc = (preds == label).float().mean()
         mae = F.l1_loss(regression_output.squeeze(), mmse)
-        spec = self.specificity(preds, label)
-        sens = self.sensitivity(preds, label)
         
+        # Detailed metrics logging
         self.log('test_total_loss', total_loss, on_epoch=True)
         self.log('test_classification_loss', classification_loss, on_epoch=True)
         self.log('test_regression_loss', regression_loss, on_epoch=True)
@@ -307,16 +403,13 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.log('test_regression_mae', mae, on_epoch=True, prog_bar=True)
         self.log('final_classification_weight', weights[0], on_epoch=True)
         self.log('final_regression_weight', weights[1], on_epoch=True)
-        self.log('test_specificity', spec, on_epoch=True, prog_bar=True)
-        self.log('test_sensitivity', sens, on_epoch=True, prog_bar=True)
+        
         return {
             'preds': preds,
             'true_labels': label,
             'predicted_mmse': regression_output.squeeze(),
             'true_mmse': mmse,
-            'final_weights': weights.cpu(),
-            'specificity': spec,
-            'sensitivity': sens
+            'final_weights': weights.cpu()
         }
 
     def configure_optimizers(self):

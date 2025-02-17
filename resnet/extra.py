@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 from torchmetrics import Accuracy, MeanAbsoluteError
 from torchvision.models.video import r3d_18, R3D_18_Weights
+from torchmetrics import Specificity, Sensitivity
 
 class GradNormOptimizer:
     def __init__(self, model, num_tasks=2, alpha=1.5):
@@ -247,7 +248,8 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.val_classification_accuracy = Accuracy(task='multiclass', num_classes=num_classes)
         self.test_classification_accuracy = Accuracy(task='multiclass', num_classes=num_classes)
         self.mmse_mae = MeanAbsoluteError()
-        
+        self.specificity = Specificity(task='multiclass', num_classes=num_classes)
+        self.sensitivity = Sensitivity(task='multiclass', num_classes=num_classes)
         # Losses
         self.classification_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
         self.regression_loss = nn.HuberLoss()
@@ -382,7 +384,8 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         preds = torch.argmax(classification_output, dim=1)
         acc = (preds == label).float().mean()
         mae = F.l1_loss(regression_output.squeeze(), mmse)
-        
+        spec = self.specificity(preds, label)
+        sens = self.sensitivity(preds, label)
         # Detailed metrics logging
         self.log('test_total_loss', total_loss, on_epoch=True)
         self.log('test_classification_loss', classification_loss, on_epoch=True)
@@ -391,13 +394,16 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.log('test_regression_mae', mae, on_epoch=True, prog_bar=True)
         self.log('final_classification_weight', weights[0], on_epoch=True)
         self.log('final_regression_weight', weights[1], on_epoch=True)
-        
+        self.log('test_specificity', spec, on_epoch=True, prog_bar=True)
+        self.log('test_sensitivity', sens, on_epoch=True, prog_bar=True)
         return {
             'preds': preds,
             'true_labels': label,
             'predicted_mmse': regression_output.squeeze(),
             'true_mmse': mmse,
-            'final_weights': weights.cpu()
+            'final_weights': weights.cpu(),
+            'specificity': spec,
+            'sensitivity': sens
         }
 
     def configure_optimizers(self):

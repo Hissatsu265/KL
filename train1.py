@@ -5,6 +5,9 @@ from multitask.multitaskdataset import MultitaskAlzheimerDataset
 from multitask.visualize.visualize import visualize_and_save_gradcam,plot_and_save_optimization_metrics
 import torchvision.transforms as transforms
 import random
+import wandb
+from pytorch_lightning.loggers import WandbLogger
+from multitask.visualize.gradcam3D import GradCAM3D, save_gradcam
 # from multitask.model_v1 import MultiTaskAlzheimerModel
 # from multitask.model import MultiTaskAlzheimerModel
 # from multitask.KKT import MultiTaskAlzheimerModel
@@ -123,7 +126,7 @@ class CustomDataset:
     
     def __len__(self):
         return len(self.data)
-def main():
+def main(wandb_logger):
     print('start')
     ad3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/ad3y_skull.pt'))  
     mci3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/mci3y_skull.pt'))
@@ -143,7 +146,7 @@ def main():
     dataset=CustomDataset(dataset_list)
     # =====================================================
     batch_size = 16
-    max_epochs = 100
+    max_epochs = 1
     num_classes = 3
     input_shape = (1, 64, 64, 64) 
     
@@ -158,6 +161,14 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=batch_size,num_workers=4)
     print('==================================')
     model = MultiTaskAlzheimerModel(num_classes=num_classes)
+    
+    # for name, module in model.named_modules():
+    #     print(name)
+    # target_layer = model.backbone[4][1].conv2  # Chọn layer backbone.4.1.conv2
+    # gradcam = GradCAM3D(model, target_layer)
+
+    # target_layer = dict(model.named_modules())["backbone.4.1.conv2"]
+    # gradcam = GradCAM3D(model, target_layer)
     checkpoint_callback = ModelCheckpoint(
         monitor='val_loss',
         dirpath='checkpoints/',
@@ -185,16 +196,19 @@ def main():
         strategy='ddp',
         callbacks=[checkpoint_callback, early_stop_callback],
         # logger=logger,
+        # logger=wandb_logger,
         deterministic=False
     )
     # Training
     trainer.fit(
         model, 
         train_dataloaders=train_loader,
-        val_dataloaders=val_loader
+        val_dataloaders=val_loader,
     )
     # Testing
     trainer.test(model, dataloaders=test_loader)
+    wandb.finish()
+    return test_loader,model
     # save_path = '/home/jupyter-iec_iot13_toanlm/multitask/visualize'
     # test_batch = next(iter(test_loader))
     # image = test_batch['image'][0]
@@ -204,6 +218,38 @@ def main():
 # ============================================================
 if __name__ == '__main__':
     print('hi')
-    main()
+    # wandb.init(
+    #     project="alzheimer-multitask",
+    #     config={
+    #         "architecture": "R3D_18",
+    #         "dataset": "ADNI",
+    #         "batch_size": 16,
+    #         "learning_rate": 1e-3,
+    #         "num_classes": 2,
+    #         "epochs": 100,
+    #     }
+    # )
+    wandb_logger = WandbLogger(project="alzheimer-multitask")
+    # # main()
+    test_loader,model =main(wandb_logger)
+    # target_layer = dict(model.named_modules())["backbone.0"]
+
+    # # Tạo Grad-CAM
+    # gradcam = GradCAM3D(model, target_layer)
+
+    # # Load một mẫu test
+    # test_batch = next(iter(test_loader))
+    # image = test_batch['image'][0]  # Chọn một ảnh trong batch
+    # # metadata = test_batch['metadata'][0]
+    # metadata = torch.stack([test_batch['mmse'][0], test_batch['age'][0], test_batch['gender'][0]], dim=0)
+    # # Tạo Grad-CAM
+    
+    # cam = gradcam.generate_cam(image,metadata)
+    # print(f"Grad-CAM shape: {cam.shape}")  # Debug kích thước cam
+
+    # # Lưu ảnh Grad-CAM vào thư mục
+    # save_gradcam(cam, "/home/jupyter-iec_iot13_toanlm/multitask/visualize/sample_gradcam.png", slice_idx=32)
+
+    # print("Grad-CAM saved successfully!")
 
     

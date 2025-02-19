@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 from torchmetrics import Accuracy, MeanAbsoluteError
 from torchvision.models.video import r3d_18, R3D_18_Weights
 
-from multitask.visualize.visualize import visualize_and_save_gradcam,plot_and_save_optimization_metrics
+from multitask.visualize.visualize import visualize_and_save_gradcam,plot_and_save_optimization_metrics,plot_confusion_matrix
 import os
 from typing import List
 # from torchmetrics import RootMeanSquaredError
@@ -289,15 +289,21 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             self.specificity = MulticlassSpecificity(num_classes=num_classes)
             self.sensitivity = MulticlassRecall(num_classes=num_classes)
         else:
-            self.specificity = BinarySpecificity()  # For binary classification
+            self.specificity = BinarySpecificity()  
             self.sensitivity = BinaryRecall()
- 
+        self.test_predictions = []
+        self.test_labels = []
         self.loss_history = {
             'classification': [],
             'regression': [],
-            'weights': []
+            'weights': [],
+            'grad_norms_classification': [],
+            'grad_norms_regression': []
         }
         self._init_weights()
+        self.num_AD=0
+        self.num_CN=0
+        self.num_MCI=0
     
     def _init_weights(self):
         for m in self.modules():
@@ -343,14 +349,29 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         
         classification_loss = self.classification_loss(classification_output, label)
         regression_loss = self.regression_loss(regression_output.squeeze(), mmse)
-        
+
+        # Calculate gradient norms before the multi-task optimizer update
+        classification_loss.backward(retain_graph=True)
+        grad_norm_classification = torch.norm(torch.stack([
+            torch.norm(p.grad) 
+            for p in self.parameters() 
+            if p.grad is not None
+        ]))
+        self.zero_grad()
+    
+        regression_loss.backward(retain_graph=True)
+        grad_norm_regression = torch.norm(torch.stack([
+            torch.norm(p.grad) 
+            for p in self.parameters() 
+            if p.grad is not None
+        ]))
+        self.zero_grad()
+        # =========================================================================================
         shared_params = list(self.shared_representation.parameters())
     
         losses = [classification_loss.to(self.device), regression_loss.to(self.device)]
         weights = self.multi_task_optimizer.update_weights(losses, shared_params)
         
-        # losses = [classification_loss.to(self.device), regression_loss.to(self.device)]
-        # weights = self.multi_task_optimizer.update_weights(losses)
         
         total_loss = torch.sum(torch.stack(losses) * weights)
         
@@ -369,7 +390,8 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.loss_history['classification'].append(classification_loss.item())
         self.loss_history['regression'].append(regression_loss.item())
         self.loss_history['weights'].append(weights.tolist())
-        
+        self.loss_history['grad_norms_classification'].append(grad_norm_classification.item())
+        self.loss_history['grad_norms_regression'].append(grad_norm_regression.item())
 
         return total_loss
 
@@ -402,6 +424,16 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         image, label, mmse, age, gender = batch['image'], batch['label'], batch['mmse'], batch['age'], batch['gender']
+        # print(label)
+        for ij in label:  # Duyệt qua từng phần tử trong batch
+            label1 = ij.item()  # Lấy giá trị số nguyên từ tensor
+            if label1 == 0:
+                self.num_AD += 1
+            elif label1 == 1:
+                self.num_CN += 1
+            else:
+                self.num_MCI += 1
+        
         metadata = torch.stack([mmse, age, gender], dim=1).float()
         
         classification_output, regression_output = self(image, metadata)
@@ -432,10 +464,11 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         
         self.log('test_specificity', spec, on_epoch=True, prog_bar=True)
         self.log('test_sensitivity', sens, on_epoch=True, prog_bar=True)
-        
-        self.loss_history['classification'].append(classification_loss.item())
-        self.loss_history['regression'].append(regression_loss.item())
-        self.loss_history['weights'].append(weights.tolist())
+        self.test_predictions.append(preds.cpu())
+        self.test_labels.append(label.cpu())
+        # self.loss_history['classification'].append(classification_loss.item())
+        # self.loss_history['regression'].append(regression_loss.item())
+        # self.loss_history['weights'].append(weights.tolist())
 
         
         return {
@@ -447,14 +480,36 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             'specificity': spec,
             'sensitivity': sens
         }
+    def on_test_start(self):
+    # Clear previous predictions at the start of testing
+        self.test_predictions = []
+        self.test_labels = []
     def on_test_end(self):
+        print("============================================")
+        print(self.num_AD)
+        print(self.num_CN)
+        print(self.num_MCI)
+        print("============================================")
+      
         save_path = '/home/jupyter-iec_iot13_toanlm/multitask/visualize'
         os.makedirs(save_path, exist_ok=True)
         
-        if hasattr(self, 'sample_images'):
-            image = self.sample_images[0]  
-            visualize_and_save_gradcam(self, image, save_path, num_slices=4)
+        all_preds = torch.cat(self.test_predictions).numpy()
+        all_labels = torch.cat(self.test_labels).numpy()
         
+        if hasattr(self, 'num_classes') and self.num_classes > 2:
+            class_names = ["AD", "CN", "MCI"]
+        else:
+            # class_names = ["AD", "CN"]
+            class_names = [ "CN","MCI"]
+        
+        # Plot confusion matrix
+        plot_confusion_matrix(
+            y_true=all_labels,
+            y_pred=all_preds,
+            save_path=save_path,
+            classes=class_names
+        )
         
         plot_and_save_optimization_metrics(self, save_path)
     def configure_optimizers(self):

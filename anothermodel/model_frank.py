@@ -5,10 +5,9 @@ import pytorch_lightning as pl
 from torchmetrics import Accuracy, MeanAbsoluteError
 from torchvision.models.video import r3d_18, R3D_18_Weights
 
-from multitask.visualize.visualize import visualize_and_save_gradcam,plot_and_save_optimization_metrics,plot_confusion_matrix
+from multitask.visualize.visualize import visualize_and_save_gradcam,plot_and_save_optimization_metrics
 import os
 from typing import List
-# from torchmetrics import RootMeanSquaredError
 from torchmetrics.classification import BinarySpecificity, BinaryRecall
 from torchmetrics.classification import MulticlassSpecificity, MulticlassRecall
 def rmse_tt(predictions, targets):
@@ -77,29 +76,22 @@ class CombinedOptimizer:
         return self
         
     def update_weights(self, losses, shared_params):
-        # Compute GradNorm weights first with retain_graph=True
         gn_weights = self.gradnorm.update_weights(losses, shared_params)
         
-        # Then compute Frank-Wolfe weights
         fw_weights = self.frank_wolfe.update_weights(losses)
         
-        # Combine weights
         combined_weights = (self.frank_wolfe_weight * fw_weights + 
                           (1 - self.frank_wolfe_weight) * gn_weights)
         
-        # Extra weight for regression task
-        # combined_weights[1] *= 1.2
-        
-        # self.weights = F.softmax(combined_weights, dim=0)    
+  
         self.weights = combined_weights
         return self.weights
 class FrankWolfeOptimizer:
-    def __init__(self, num_tasks=2, max_iter=10, beta=0.1):
+    def __init__(self, num_tasks=2, step_size_param=0.1):
         self.num_tasks = num_tasks
-        self.max_iter = max_iter
         self.weights = None
         self.device = None
-        self.beta = beta  # Parameter for gamma calculation
+        self.step_size_param = step_size_param
         self.iteration = 0
         self.loss_history = []
         
@@ -110,56 +102,40 @@ class FrankWolfeOptimizer:
         else:
             self.weights = self.weights.to(device)
         return self
-        
-    def compute_gradient(self, losses, prev_weights):
-        # Formula 1: Enhanced gradient computation
-        # gi = 0.9 * log(1 + Li) + 0.1 * wi_prev
-        losses_tensor = torch.stack([loss.detach() for loss in losses])
-        log_losses = torch.log(1 + losses_tensor)
-        return 0.9 * log_losses + 0.1 * prev_weights
     
-    def compute_gamma(self, losses):
-        # Formula 2: Enhanced gamma computation
-        # γ = min(1, 2/(t+2)) * exp(-β * L_mean)
-        L_mean = torch.mean(torch.stack([loss.detach() for loss in losses]))
-        base_gamma = min(1.0, 2.0 / (self.iteration + 2))
-        return base_gamma * torch.exp(-self.beta * L_mean)
+    def compute_step_size(self):
+        # Standard Frank-Wolfe step size
+        return 2.0 / (self.iteration + 2.0)
     
-    def solve_linear_problem(self, gradients):
-        min_idx = torch.argmin(gradients)
-        s = torch.zeros_like(self.weights, device=self.device)
-        s[min_idx] = 1.0
-        return s
+    def project_to_simplex(self, gradient):
+        # Find vertex of simplex in direction of negative gradient
+        min_idx = torch.argmax(gradient)
+        vertex = torch.zeros_like(self.weights, device=self.device)
+        vertex[min_idx] = 1.0
+        return vertex
     
     def update_weights(self, losses):
         if self.weights is None:
             self.device = losses[0].device
             self.weights = (torch.ones(self.num_tasks) / self.num_tasks).to(self.device)
-            
-        prev_weights = self.weights.clone()
         
-        # Compute enhanced gradient
-        gradients = self.compute_gradient(losses, prev_weights)
+        # Compute loss gradient
+        losses_tensor = torch.stack([loss.detach() for loss in losses])
         
-        # Solve linear problem
-        s = self.solve_linear_problem(gradients)
+        # Project gradient onto simplex
+        s = self.project_to_simplex(losses_tensor)
         
-        # Compute enhanced gamma
-        gamma = self.compute_gamma(losses)
+        # Compute step size
+        gamma = self.compute_step_size()
         
-        # Formula 3: Enhanced weight update with logarithmic barrier
-        # w_new = (1 - γ) * w_prev + γ * log(1 + s)
-        log_barrier = torch.log(1 + s)
-        new_weights = (1 - gamma) * prev_weights + gamma * log_barrier
-        
-        # Formula 4: Softmax normalization
-        self.weights = F.softmax(new_weights, dim=0)
+        # Update weights using Frank-Wolfe update rule
+        self.weights = (1 - gamma) * self.weights + gamma * s
         
         # Update iteration counter and store loss history
         self.iteration += 1
         self.loss_history.append([loss.item() for loss in losses])
         
-        return self.weights
+        return self.weightss
 
 class AttentionGatingModule(nn.Module):
     def __init__(self, feature_dim):
@@ -289,10 +265,9 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             self.specificity = MulticlassSpecificity(num_classes=num_classes)
             self.sensitivity = MulticlassRecall(num_classes=num_classes)
         else:
-            self.specificity = BinarySpecificity()  
+            self.specificity = BinarySpecificity()  # For binary classification
             self.sensitivity = BinaryRecall()
-        self.test_predictions = []
-        self.test_labels = []
+ 
         self.loss_history = {
             'classification': [],
             'regression': [],
@@ -301,9 +276,10 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             'grad_norms_regression': []
         }
         self._init_weights()
-        self.num_AD=0
-        self.num_CN=0
-        self.num_MCI=0
+        self.multi_task_optimizer = FrankWolfeOptimizer(
+            num_tasks=2,
+            step_size_param=0.1
+        )
     
     def _init_weights(self):
         for m in self.modules():
@@ -341,6 +317,59 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         
         return classification_output, regression_output
 
+    # def training_step(self, batch, batch_idx):
+    #     image, label, mmse, age, gender = batch['image'], batch['label'], batch['mmse'], batch['age'], batch['gender']
+    #     metadata = torch.stack([mmse, age, gender], dim=1).float()
+        
+    #     classification_output, regression_output = self(image, metadata)
+        
+    #     classification_loss = self.classification_loss(classification_output, label)
+    #     regression_loss = self.regression_loss(regression_output.squeeze(), mmse)
+
+    #     # Calculate gradient norms before the multi-task optimizer update
+    #     classification_loss.backward(retain_graph=True)
+    #     grad_norm_classification = torch.norm(torch.stack([
+    #         torch.norm(p.grad) 
+    #         for p in self.parameters() 
+    #         if p.grad is not None
+    #     ]))
+    #     self.zero_grad()
+    
+    #     regression_loss.backward(retain_graph=True)
+    #     grad_norm_regression = torch.norm(torch.stack([
+    #         torch.norm(p.grad) 
+    #         for p in self.parameters() 
+    #         if p.grad is not None
+    #     ]))
+    #     self.zero_grad()
+    #     # =========================================================================================
+    #     shared_params = list(self.shared_representation.parameters())
+    
+    #     losses = [classification_loss.to(self.device), regression_loss.to(self.device)]
+    #     weights = self.multi_task_optimizer.update_weights(losses, shared_params)
+        
+        
+    #     total_loss = torch.sum(torch.stack(losses) * weights)
+        
+    #     preds = torch.argmax(classification_output, dim=1)
+    #     acc = (preds == label).float().mean()
+        
+    #     # Logging
+    #     self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
+    #     self.log('train_classification_loss', classification_loss, on_step=True, on_epoch=True)
+    #     self.log('train_regression_loss', regression_loss, on_step=True, on_epoch=True)
+    #     self.log('train_classification_acc', acc, on_step=True, on_epoch=True, prog_bar=True)
+    #     self.log('train_classification_weight', weights[0], on_step=True, on_epoch=True)
+    #     self.log('train_regression_weight', weights[1], on_step=True, on_epoch=True)
+        
+    #     # Save history
+    #     self.loss_history['classification'].append(classification_loss.item())
+    #     self.loss_history['regression'].append(regression_loss.item())
+    #     self.loss_history['weights'].append(weights.tolist())
+    #     self.loss_history['grad_norms_classification'].append(grad_norm_classification.item())
+    #     self.loss_history['grad_norms_regression'].append(grad_norm_regression.item())
+
+    #     return total_loss
     def training_step(self, batch, batch_idx):
         image, label, mmse, age, gender = batch['image'], batch['label'], batch['mmse'], batch['age'], batch['gender']
         metadata = torch.stack([mmse, age, gender], dim=1).float()
@@ -349,8 +378,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         
         classification_loss = self.classification_loss(classification_output, label)
         regression_loss = self.regression_loss(regression_output.squeeze(), mmse)
-
-        # Calculate gradient norms before the multi-task optimizer update
+        
         classification_loss.backward(retain_graph=True)
         grad_norm_classification = torch.norm(torch.stack([
             torch.norm(p.grad) 
@@ -366,15 +394,14 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             if p.grad is not None
         ]))
         self.zero_grad()
-        # =========================================================================================
-        shared_params = list(self.shared_representation.parameters())
-    
+    #     # =========================================================================================
+        # Update weights using only Frank-Wolfe
         losses = [classification_loss.to(self.device), regression_loss.to(self.device)]
-        weights = self.multi_task_optimizer.update_weights(losses, shared_params)
-        
+        weights = self.multi_task_optimizer.update_weights(losses)
         
         total_loss = torch.sum(torch.stack(losses) * weights)
         
+        # Calculate accuracy
         preds = torch.argmax(classification_output, dim=1)
         acc = (preds == label).float().mean()
         
@@ -390,8 +417,6 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.loss_history['classification'].append(classification_loss.item())
         self.loss_history['regression'].append(regression_loss.item())
         self.loss_history['weights'].append(weights.tolist())
-        self.loss_history['grad_norms_classification'].append(grad_norm_classification.item())
-        self.loss_history['grad_norms_regression'].append(grad_norm_regression.item())
 
         return total_loss
 
@@ -424,16 +449,6 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         image, label, mmse, age, gender = batch['image'], batch['label'], batch['mmse'], batch['age'], batch['gender']
-        # print(label)
-        for ij in label:  # Duyệt qua từng phần tử trong batch
-            label1 = ij.item()  # Lấy giá trị số nguyên từ tensor
-            if label1 == 0:
-                self.num_AD += 1
-            elif label1 == 1:
-                self.num_CN += 1
-            else:
-                self.num_MCI += 1
-        
         metadata = torch.stack([mmse, age, gender], dim=1).float()
         
         classification_output, regression_output = self(image, metadata)
@@ -464,11 +479,10 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         
         self.log('test_specificity', spec, on_epoch=True, prog_bar=True)
         self.log('test_sensitivity', sens, on_epoch=True, prog_bar=True)
-        self.test_predictions.append(preds.cpu())
-        self.test_labels.append(label.cpu())
-        # self.loss_history['classification'].append(classification_loss.item())
-        # self.loss_history['regression'].append(regression_loss.item())
-        # self.loss_history['weights'].append(weights.tolist())
+        
+        self.loss_history['classification'].append(classification_loss.item())
+        self.loss_history['regression'].append(regression_loss.item())
+        self.loss_history['weights'].append(weights.tolist())
 
         
         return {
@@ -480,36 +494,14 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             'specificity': spec,
             'sensitivity': sens
         }
-    def on_test_start(self):
-    # Clear previous predictions at the start of testing
-        self.test_predictions = []
-        self.test_labels = []
     def on_test_end(self):
-        print("============================================")
-        print(self.num_AD)
-        print(self.num_CN)
-        print(self.num_MCI)
-        print("============================================")
-      
         save_path = '/home/jupyter-iec_iot13_toanlm/multitask/visualize'
         os.makedirs(save_path, exist_ok=True)
         
-        all_preds = torch.cat(self.test_predictions).numpy()
-        all_labels = torch.cat(self.test_labels).numpy()
+        if hasattr(self, 'sample_images'):
+            image = self.sample_images[0]  
+            visualize_and_save_gradcam(self, image, save_path, num_slices=4)
         
-        if hasattr(self, 'num_classes') and self.num_classes > 2:
-            class_names = ["AD", "CN", "MCI"]
-        else:
-            # class_names = ["AD", "CN"]
-            class_names = [ "CN","MCI"]
-        
-        # Plot confusion matrix
-        plot_confusion_matrix(
-            y_true=all_labels,
-            y_pred=all_preds,
-            save_path=save_path,
-            classes=class_names
-        )
         
         plot_and_save_optimization_metrics(self, save_path)
     def configure_optimizers(self):

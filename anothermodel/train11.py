@@ -8,23 +8,15 @@ import random
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 from multitask.visualize.gradcam3D import GradCAM3D, save_gradcam
-# from multitask.model_v1 import MultiTaskAlzheimerModel
-# from multitask.model import MultiTaskAlzheimerModel
-# from multitask.KKT import MultiTaskAlzheimerModel
-# from multitask.crosseff import MultiTaskAlzheimerModel
-# from multitask.frankwolfe import MultiTaskAlzheimerModel
-# from multitask.resnet_original import MultiTaskAlzheimerModel
-# from multitask.resnet18 import MultiTaskAlzheimerModel
-# from multitask.resnet_frank import MultiTaskAlzheimerModel
-# from multitask.resnet.frankwolfe_update import MultiTaskAlzheimerModel
-# from multitask.resnet.extra import MultiTaskAlzheimerMosdel
-from multitask.resnet.proposefrank import MultiTaskAlzheimerModel
-# from multitask.resnet.nguyenban import MultiTaskAlzheimerModel
-# from multitask.frank_1 import MultiTaskAlzheimerModel
-# from multitask.frank1_3_2025 import MultiTaskAlzheimerModel
 
-# from multitask.KKT_1 import MultiTaskAlzheimerModel
-# import torch.nn.functional as F
+from multitask.anothermodel.model_frank import MultiTaskAlzheimerModel
+# from multitask.anothermodel.model import MultiTaskAlzheimerModel
+# from multitask.anothermodel.model_grad import MultiTaskAlzheimerModel
+# from multitask.anothermodel.model_gradfrank import MultiTaskAlzheimerModel
+
+# from multitask.resnet.proposefrank import MultiTaskAlzheimerModel
+
+import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader, random_split
 import pytorch_lightning as pl
@@ -43,8 +35,7 @@ class RandomRotation3D:
         
     def __call__(self, x):
         angle = random.uniform(-self.degrees, self.degrees)
-        # Implement 3D rotation here
-        return x  # Placeholder for actual implementation
+        return x  
 
 class RandomTranslation3D:
     def __init__(self, max_shift):
@@ -52,8 +43,7 @@ class RandomTranslation3D:
         
     def __call__(self, x):
         shift = random.uniform(-self.max_shift, self.max_shift)
-        # Implement 3D translation here
-        return x  # Placeholder for actual implementation
+        return x  
 
 class RandomFlip3D:
     def __init__(self, p=0.5):
@@ -61,7 +51,7 @@ class RandomFlip3D:
         
     def __call__(self, x):
         if random.random() < self.p:
-            dim = random.randint(0, 2)  # Chọn ngẫu nhiên chiều để lật
+            dim = random.randint(0, 2) 
             return torch.flip(x, [dim+1])  
         return x
 
@@ -83,7 +73,6 @@ class RandomNoise:
     
 class CustomDataset:
     def __init__(self, file_path):
-        # self.data = torch.load(file_path)
         self.data=file_path
         self.is_train=True
         self.train_transforms = transforms.Compose([
@@ -112,9 +101,7 @@ class CustomDataset:
         gender = torch.tensor(float(metadata['gender']), dtype=torch.float32)
         # if (label==2):
         #     label=label-1
-        # if(label!=2 or label !=1):
-        #     print()
-        #     print('husssssssssssssssssssssssssssssssssssssssssssssss')
+
         return {
             'image': image,
             # 'label': label-1,
@@ -141,13 +128,12 @@ def main(wandb_logger):
     print('AD: ',len(ad))
     print('CN: ',len(cn))
     # dataset_list = ad3y + mci3y + cn3y + ad1y + cn2y
-    dataset_list =cn+mci3y+ad+cn+mci3y+ad+cn+mci3y+ad
-    print(len(dataset_list))
+    dataset_list =cn+mci3y+ad
     # dataset_list = dataset_list + mci3y  
     dataset=CustomDataset(dataset_list)
     # =====================================================
     batch_size = 16
-    max_epochs = 100
+    max_epochs = 1
     num_classes = 3
     input_shape = (1, 64, 64, 64) 
     
@@ -162,19 +148,12 @@ def main(wandb_logger):
     test_loader = DataLoader(test_dataset, batch_size=batch_size,num_workers=4)
     print('==================================')
     model = MultiTaskAlzheimerModel(num_classes=num_classes)
-    
-    # for name, module in model.named_modules():
-    #     print(name)
-    # target_layer = model.backbone[4][1].conv2  # Chọn layer backbone.4.1.conv2
-    # gradcam = GradCAM3D(model, target_layer)
-
-    # target_layer = dict(model.named_modules())["backbone.4.1.conv2"]
-    # gradcam = GradCAM3D(model, target_layer)
+ 
     checkpoint_callback = ModelCheckpoint(
         monitor='val_loss',
         dirpath='checkpoints/',
         filename='alzheimer-{epoch:02d}-{val_acc:.2f}',
-        save_top_k=3,
+        save_top_k=1,
         save_weights_only=True,
         mode='min'
     )
@@ -186,9 +165,7 @@ def main(wandb_logger):
         verbose=True,
         mode='min'
     )
-    
-    # logger = TensorBoardLogger('tb_logs', name='alzheimer_3d_classification')
-    # Trainer
+ 
     trainer = pl.Trainer(
         max_epochs=max_epochs,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
@@ -197,58 +174,31 @@ def main(wandb_logger):
         devices=2,
         strategy='ddp',
         callbacks=[checkpoint_callback, early_stop_callback],
-        # logger=logger,
         logger=wandb_logger,
         deterministic=False
     )
-    # Training
     trainer.fit(
         model, 
         train_dataloaders=train_loader,
         val_dataloaders=val_loader,
     )
-    # Testing
     trainer.test(model, dataloaders=test_loader)
     wandb.finish()
     return test_loader,model
-    save_path = '/home/jupyter-iec_iot13_toanlm/multitask/visualize'
-    plot_and_save_optimization_metrics(model, save_path)
-    visualize_results(model, model.loss_history, sample_input)
+
 # ============================================================
 if __name__ == '__main__':
     print('hi')
-    # wandb.init(
-    #     project="alzheimer-multitask",
-    #     config={
-    #         "architecture": "R3D_18",
-    #         "dataset": "ADNI",
-    #         "batch_size": 16,
-    #         "learning_rate": 1e-3,
-    #         "num_classes": 2,
-    #         "epochs": 100,
-    #     }
-    # )
-    wandb_logger = WandbLogger(project="alzheimer-multitask")
-    # # main()
+    wandb.init(
+        project="model_compare",
+        config={
+            "architecture": "R3D_18",
+            "dataset": "ADNI",
+            "batch_size": 16,
+            "learning_rate": 1e-3,
+            "num_classes": 2,
+            "epochs": 100,
+        }
+    )
+    wandb_logger = WandbLogger(project="model_compare")
     test_loader,model =main(wandb_logger)
-    # target_layer = dict(model.named_modules())["backbone.0"]
-
-    # # Tạo Grad-CAM
-    # gradcam = GradCAM3D(model, target_layer)
-
-    # # Load một mẫu test
-    # test_batch = next(iter(test_loader))
-    # image = test_batch['image'][0]  # Chọn một ảnh trong batch
-    # # metadata = test_batch['metadata'][0]
-    # metadata = torch.stack([test_batch['mmse'][0], test_batch['age'][0], test_batch['gender'][0]], dim=0)
-    # # Tạo Grad-CAM
-    
-    # cam = gradcam.generate_cam(image,metadata)
-    # print(f"Grad-CAM shape: {cam.shape}")  # Debug kích thước cam
-
-    # # Lưu ảnh Grad-CAM vào thư mục
-    # save_gradcam(cam, "/home/jupyter-iec_iot13_toanlm/multitask/visualize/sample_gradcam.png", slice_idx=32)
-
-    # print("Grad-CAM saved successfully!")
-
-    

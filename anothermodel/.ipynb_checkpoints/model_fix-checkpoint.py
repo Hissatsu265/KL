@@ -45,6 +45,7 @@ class AttentionGatingModule(nn.Module):
         gated_features = shared_features * attention_weights + \
                         task_specific_features * (1 - attention_weights)
         
+        # Add residual connection
         residual = self.residual(gated_features)
         return gated_features + residual
 
@@ -54,36 +55,13 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
                  input_shape=(1, 64, 64, 64),
                  metadata_dim=2,
                  pretrained=True,
-                 classification_weight=0.5,  # Initial weight for classification loss
-                 regression_weight=0.5,      # Initial weight for regression loss
-                 use_frank_wolfe=True,       # Whether to use Frank-Wolfe for dynamic weighting
-                 fw_gamma=0.5,               # Frank-Wolfe step size parameter
-                 fw_update_freq=5):          # Update frequency (in batches)
+                 classification_weight=0.5,  # Weight for classification loss
+                 regression_weight=0.5):     # Weight for regression loss
         super(MultiTaskAlzheimerModel, self).__init__()
         
-        # Save hyperparameters
-        self.save_hyperparameters()
-        
-        # Loss weights
+        # Save loss weights
         self.classification_weight = classification_weight
         self.regression_weight = regression_weight
-        
-        # Frank-Wolfe optimization parameters
-        self.use_frank_wolfe = use_frank_wolfe
-        self.fw_gamma = fw_gamma
-        self.fw_update_freq = fw_update_freq
-        self.batch_counter = 0
-        
-        # Initialize task-specific loss gradients
-        self.classification_loss_grad = 0.0
-        self.regression_loss_grad = 0.0
-        
-        # For tracking weight changes
-        self.weight_history = {
-            'classification': [classification_weight],
-            'regression': [regression_weight],
-            'steps': [0]
-        }
         
         if pretrained:
             print('Loading pretrained model===================================')
@@ -223,44 +201,6 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         regression_output = self.regression_branch(regression_features)
         
         return classification_output, regression_output
-    
-    def _update_weights_frank_wolfe(self, losses):
-
-        classification_loss, regression_loss = losses
-        
-        # Use exponential moving average for stability
-        alpha = 0.9
-        self.classification_loss_grad = alpha * self.classification_loss_grad + (1 - alpha) * classification_loss.item()
-        self.regression_loss_grad = alpha * self.regression_loss_grad + (1 - alpha) * regression_loss.item()
-        
-        # Compute gradients
-        grads = torch.tensor([self.classification_loss_grad, self.regression_loss_grad], 
-                            device=self.device)
-        
-        # Find the vertex with minimum inner product (Frank-Wolfe)
-        min_idx = torch.argmin(grads).item()
-        s = torch.zeros_like(grads)
-        s[min_idx] = 1.0
-        
-        # Current weights
-        weights = torch.tensor([self.classification_weight, self.regression_weight], 
-                              device=self.device)
-        
-        # Update weights using convex combination
-        new_weights = (1 - self.fw_gamma) * weights + self.fw_gamma * s
-        
-        # Update weight attributes
-        self.classification_weight = new_weights[0].item()
-        self.regression_weight = new_weights[1].item()
-        
-        # Log weight updates
-        self.weight_history['classification'].append(self.classification_weight)
-        self.weight_history['regression'].append(self.regression_weight)
-        self.weight_history['steps'].append(self.batch_counter)
-        
-        # Log weights to tensorboard/wandb
-        self.log('classification_weight', self.classification_weight, on_step=True)
-        self.log('regression_weight', self.regression_weight, on_step=True)
 
     def training_step(self, batch, batch_idx):
         image, label, mmse, age, gender = batch['image'], batch['label'], batch['mmse'], batch['age'], batch['gender']
@@ -271,15 +211,8 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         classification_loss = self.classification_loss(classification_output, label)
         regression_loss = self.regression_loss(regression_output.squeeze(), mmse)
         
-        # Combine losses using current weights
+        # Combine losses directly using weights
         total_loss = self.classification_weight * classification_loss + self.regression_weight * regression_loss
-        
-        # Update Frank-Wolfe weights if enabled
-        if self.use_frank_wolfe:
-            self.batch_counter += 1
-            # Update weights every fw_update_freq batches for stability
-            if self.batch_counter % self.fw_update_freq == 0:
-                self._update_weights_frank_wolfe([classification_loss, regression_loss])
         
         preds = torch.argmax(classification_output, dim=1)
         acc = (preds == label).float().mean()
@@ -306,7 +239,6 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             
             # Log loss curves to wandb
             if self.logger and isinstance(self.logger, pl.loggers.WandbLogger):
-                # 1. Loss Curves
                 fig, ax = plt.subplots(figsize=(10, 6))
                 ax.plot(self.loss_history['epochs'], self.loss_history['total'], label='Total Loss', marker='o')
                 ax.plot(self.loss_history['epochs'], self.loss_history['classification'], label='Classification Loss', marker='s')
@@ -316,31 +248,10 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
                 ax.set_title('Training Loss Convergence')
                 ax.legend()
                 ax.grid(True)
+                
+                # Log to wandb
                 self.logger.experiment.log({"Loss Convergence": wandb.Image(fig)})
                 plt.close(fig)
-                
-                # 2. Weight Evolution
-                if self.use_frank_wolfe and len(self.weight_history['steps']) > 1:
-                    fig_weights, ax_weights = plt.subplots(figsize=(10, 6))
-                    ax_weights.plot(
-                        self.weight_history['steps'], 
-                        self.weight_history['classification'], 
-                        label='Classification Weight', 
-                        marker='o'
-                    )
-                    ax_weights.plot(
-                        self.weight_history['steps'], 
-                        self.weight_history['regression'], 
-                        label='Regression Weight', 
-                        marker='s'
-                    )
-                    ax_weights.set_xlabel('Update Steps')
-                    ax_weights.set_ylabel('Weight Value')
-                    ax_weights.set_title('Frank-Wolfe Weight Evolution')
-                    ax_weights.legend()
-                    ax_weights.grid(True)
-                    self.logger.experiment.log({"Weight Evolution": wandb.Image(fig_weights)})
-                    plt.close(fig_weights)
 
     def validation_step(self, batch, batch_idx):
         image, label, mmse, age, gender = batch['image'], batch['label'], batch['mmse'], batch['age'], batch['gender']
@@ -351,7 +262,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         classification_loss = self.classification_loss(classification_output, label)
         regression_loss = self.regression_loss(regression_output.squeeze(), mmse)
         
-        # Use current weights for validation loss
+        # Direct sum of losses with weights
         total_loss = self.classification_weight * classification_loss + self.regression_weight * regression_loss
         
         preds = torch.argmax(classification_output, dim=1)
@@ -384,7 +295,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         classification_loss = self.classification_loss(classification_output, label)
         regression_loss = self.regression_loss(regression_output.squeeze(), mmse)
         
-        # Use final optimized weights for test loss
+        # Direct sum with weights
         total_loss = self.classification_weight * classification_loss + self.regression_weight * regression_loss
     
         preds = torch.argmax(classification_output, dim=1)
@@ -428,12 +339,6 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.num_AD = 0
         self.num_CN = 0
         self.num_MCI = 0
-        
-        # Log final weights
-        if self.use_frank_wolfe:
-            print(f"Final Frank-Wolfe Loss Weights:")
-            print(f"  - Classification Weight: {self.classification_weight:.4f}")
-            print(f"  - Regression Weight: {self.regression_weight:.4f}")
         
     def on_test_end(self):
         print("============================================")
@@ -500,29 +405,9 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             self.logger.experiment.log({"MMSE Distribution Plot": wandb.Image(fig_dist)})
             plt.close(fig_dist)
             
-            # 4. Weight Evolution (if Frank-Wolfe was used)
-            if self.use_frank_wolfe and len(self.weight_history['steps']) > 1:
-                fig_weights, ax_weights = plt.subplots(figsize=(10, 6))
-                ax_weights.plot(
-                    self.weight_history['steps'], 
-                    self.weight_history['classification'], 
-                    label='Classification Weight', 
-                    marker='o'
-                )
-                ax_weights.plot(
-                    self.weight_history['steps'], 
-                    self.weight_history['regression'], 
-                    label='Regression Weight', 
-                    marker='s'
-                )
-                ax_weights.set_xlabel('Update Steps')
-                ax_weights.set_ylabel('Weight Value')
-                ax_weights.set_title('Frank-Wolfe Weight Evolution')
-                ax_weights.legend()
-                ax_weights.grid(True)
-                self.logger.experiment.log({"Final Weight Evolution": wandb.Image(fig_weights)})
-                plt.close(fig_weights)
-            
+        # You can still call the original optimization metrics if needed
+        # plot_and_save_optimization_metrics(self, save_path)
+        
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(

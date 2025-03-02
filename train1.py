@@ -142,6 +142,8 @@ def main(wandb_logger):
     print('CN: ',len(cn))
     # dataset_list = ad3y + mci3y + cn3y + ad1y + cn2y
     dataset_list =cn+mci3y+ad+cn+mci3y+ad+cn+mci3y+ad
+    # dataset_list =cn+ad+cn+ad+cn+ad
+    # dataset_list =cn+cn+cn+mci3y+mci3y+mci3y
     print(len(dataset_list))
     # dataset_list = dataset_list + mci3y  
     dataset=CustomDataset(dataset_list)
@@ -182,7 +184,7 @@ def main(wandb_logger):
     early_stop_callback = EarlyStopping(
         monitor='val_loss',
         min_delta=0.00,
-        patience=10,
+        patience=15,
         verbose=True,
         mode='min'
     )
@@ -198,7 +200,7 @@ def main(wandb_logger):
         strategy='ddp',
         callbacks=[checkpoint_callback, early_stop_callback],
         # logger=logger,
-        logger=wandb_logger,
+        # logger=wandb_logger,
         deterministic=False
     )
     # Training

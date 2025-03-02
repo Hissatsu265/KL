@@ -5,12 +5,19 @@ import pytorch_lightning as pl
 from torchmetrics import Accuracy, MeanAbsoluteError
 from torchvision.models.video import r3d_18, R3D_18_Weights
 
-from multitask.visualize.visualize import visualize_and_save_gradcam,plot_and_save_optimization_metrics,plot_confusion_matrix
 import os
+import wandb
+import matplotlib.pyplot as plt
+import numpy as np
 from typing import List
-# from torchmetrics import RootMeanSquaredError
 from torchmetrics.classification import BinarySpecificity, BinaryRecall
 from torchmetrics.classification import MulticlassSpecificity, MulticlassRecall
+
+def rmse_tt(predictions, targets):
+    mse = F.mse_loss(predictions, targets)
+    return torch.sqrt(mse)
+
+# GradNormOptimizer, FrankWolfeOptimizer, CombinedOptimizer, and AttentionGatingModule classes remain unchanged
 def rmse_tt(predictions, targets):
         mse = F.mse_loss(predictions, targets)
         return torch.sqrt(mse)
@@ -160,7 +167,6 @@ class FrankWolfeOptimizer:
         self.loss_history.append([loss.item() for loss in losses])
         
         return self.weights
-
 class AttentionGatingModule(nn.Module):
     def __init__(self, feature_dim):
         super(AttentionGatingModule, self).__init__()
@@ -191,12 +197,11 @@ class AttentionGatingModule(nn.Module):
         # Add residual connection
         residual = self.residual(gated_features)
         return gated_features + residual
-
 class MultiTaskAlzheimerModel(pl.LightningModule):
     def __init__(self, 
                  num_classes=2, 
                  input_shape=(1, 64, 64, 64),
-                 metadata_dim=3,
+                 metadata_dim=2,
                  pretrained=True):
         super(MultiTaskAlzheimerModel, self).__init__()
         
@@ -208,15 +213,14 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
 
         self.backbone.stem[0] = nn.Conv3d(
             input_shape[0], 64, 
-            kernel_size=(3, 7, 7), 
-            stride=(1, 2, 2), 
-            padding=(1, 3, 3), 
+            kernel_size=(7, 7, 7), 
+            stride=(2, 2, 2), 
+            padding=(3, 3, 3), 
             bias=False
         )
         
-        # Remove the final classification layer
         self.backbone = nn.Sequential(*list(self.backbone.children())[:-1])
-        
+        print(self.backbone)
         self.metadata_embedding = nn.Sequential(
             nn.Linear(metadata_dim, 256),
             nn.LayerNorm(256),
@@ -247,7 +251,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         )
         
         # Task-specific branches with enhanced attention
-        self.classification_gate =AttentionGatingModule(1024)
+        self.classification_gate = AttentionGatingModule(1024)
         self.classification_branch = nn.Sequential(
             nn.Linear(1024, 512),
             nn.LayerNorm(512),
@@ -291,19 +295,29 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         else:
             self.specificity = BinarySpecificity()  
             self.sensitivity = BinaryRecall()
+        
+        # Enhanced tracking for visualization
         self.test_predictions = []
         self.test_labels = []
+        self.test_mmse_true = []
+        self.test_mmse_pred = []
+        
+        # Enhanced loss history tracking for better visualization
         self.loss_history = {
+            'epochs': [],
+            'total': [],
             'classification': [],
             'regression': [],
             'weights': [],
             'grad_norms_classification': [],
             'grad_norms_regression': []
         }
+        
         self._init_weights()
-        self.num_AD=0
-        self.num_CN=0
-        self.num_MCI=0
+        self.num_AD = 0
+        self.num_CN = 0
+        self.num_MCI = 0
+        self.current_epoch_idx = 0
     
     def _init_weights(self):
         for m in self.modules():
@@ -319,7 +333,6 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.multi_task_optimizer.to(self.device)
 
     def forward(self, image, metadata):
-        # Extract features using ResNet3D
         x = self.backbone(image)
         image_features = x.squeeze(-1).squeeze(-1).squeeze(-1)  # Remove spatial dimensions
         
@@ -343,7 +356,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         image, label, mmse, age, gender = batch['image'], batch['label'], batch['mmse'], batch['age'], batch['gender']
-        metadata = torch.stack([mmse, age, gender], dim=1).float()
+        metadata = torch.stack([age, gender], dim=1).float()
         
         classification_output, regression_output = self(image, metadata)
         
@@ -366,12 +379,11 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             if p.grad is not None
         ]))
         self.zero_grad()
-        # =========================================================================================
+        
         shared_params = list(self.shared_representation.parameters())
     
         losses = [classification_loss.to(self.device), regression_loss.to(self.device)]
         weights = self.multi_task_optimizer.update_weights(losses, shared_params)
-        
         
         total_loss = torch.sum(torch.stack(losses) * weights)
         
@@ -386,18 +398,62 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.log('train_classification_weight', weights[0], on_step=True, on_epoch=True)
         self.log('train_regression_weight', weights[1], on_step=True, on_epoch=True)
         
-        # Save history
-        self.loss_history['classification'].append(classification_loss.item())
-        self.loss_history['regression'].append(regression_loss.item())
-        self.loss_history['weights'].append(weights.tolist())
-        self.loss_history['grad_norms_classification'].append(grad_norm_classification.item())
-        self.loss_history['grad_norms_regression'].append(grad_norm_regression.item())
-
         return total_loss
+    
+    def on_train_epoch_end(self):
+        # Store loss values at the end of each epoch for plotting
+        self.loss_history['epochs'].append(self.current_epoch_idx)
+        
+        # Get the current epoch's average loss values
+        avg_total_loss = self.trainer.callback_metrics.get('train_loss_epoch', 0)
+        avg_class_loss = self.trainer.callback_metrics.get('train_classification_loss_epoch', 0)
+        avg_reg_loss = self.trainer.callback_metrics.get('train_regression_loss_epoch', 0)
+        
+        # Convert from tensor to float if needed
+        if hasattr(avg_total_loss, 'item'):
+            avg_total_loss = avg_total_loss.item()
+        if hasattr(avg_class_loss, 'item'):
+            avg_class_loss = avg_class_loss.item()
+        if hasattr(avg_reg_loss, 'item'):
+            avg_reg_loss = avg_reg_loss.item()
+            
+        # Store for later plotting
+        self.loss_history['total'].append(avg_total_loss)
+        self.loss_history['classification'].append(avg_class_loss)
+        self.loss_history['regression'].append(avg_reg_loss)
+        
+        # Plot and log to wandb after each epoch
+        self.plot_loss_curves()
+        
+        # Increment epoch counter
+        self.current_epoch_idx += 1
+
+    def plot_loss_curves(self):
+        """Plot and log loss curves to wandb"""
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        if len(self.loss_history['epochs']) > 0:
+            ax.plot(self.loss_history['epochs'], self.loss_history['total'], 
+                   label='Total Loss', marker='o')
+            ax.plot(self.loss_history['epochs'], self.loss_history['classification'], 
+                   label='Classification Loss', marker='s')
+            ax.plot(self.loss_history['epochs'], self.loss_history['regression'], 
+                   label='Regression Loss', marker='^')
+            
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('Loss')
+            ax.set_title('Training Loss Convergence')
+            ax.legend()
+            ax.grid(True)
+            
+            # Log to wandb
+            self.logger.experiment.log({"Training Loss Curves": wandb.Image(fig)})
+        
+        plt.close(fig)
 
     def validation_step(self, batch, batch_idx):
         image, label, mmse, age, gender = batch['image'], batch['label'], batch['mmse'], batch['age'], batch['gender']
-        metadata = torch.stack([mmse, age, gender], dim=1).float()
+        metadata = torch.stack([age, gender], dim=1).float()
         
         classification_output, regression_output = self(image, metadata)
         
@@ -405,7 +461,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         regression_loss = self.regression_loss(regression_output.squeeze(), mmse)
         
         losses = [classification_loss.to(self.device), regression_loss.to(self.device)]
-        weights = self.multi_task_optimizer.weights  # Now this will work
+        weights = self.multi_task_optimizer.weights
         
         total_loss = torch.sum(torch.stack(losses) * weights)
         
@@ -424,9 +480,10 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         image, label, mmse, age, gender = batch['image'], batch['label'], batch['mmse'], batch['age'], batch['gender']
-        # print(label)
-        for ij in label:  # Duyệt qua từng phần tử trong batch
-            label1 = ij.item()  # Lấy giá trị số nguyên từ tensor
+        
+        # Track distribution of classes
+        for ij in label:
+            label1 = ij.item()
             if label1 == 0:
                 self.num_AD += 1
             elif label1 == 1:
@@ -434,16 +491,13 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             else:
                 self.num_MCI += 1
         
-        metadata = torch.stack([mmse, age, gender], dim=1).float()
-        
+        metadata = torch.stack([age, gender], dim=1).float()
         classification_output, regression_output = self(image, metadata)
         
         classification_loss = self.classification_loss(classification_output, label).to(self.device)
         regression_loss = self.regression_loss(regression_output.squeeze(), mmse).to(self.device)
         
-        # weights = self.multi_task_optimizer.weights
-        # total_loss = torch.sum(torch.stack([classification_loss, regression_loss]) * weights)
-        weights = self.multi_task_optimizer.weights  # Now this will work
+        weights = self.multi_task_optimizer.weights
         total_loss = torch.sum(torch.stack([classification_loss, regression_loss]) * weights)
     
         preds = torch.argmax(classification_output, dim=1)
@@ -453,6 +507,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         spec = self.specificity(preds, label)
         sens = self.sensitivity(preds, label)
         
+        # Log metrics
         self.log('test_total_loss', total_loss, on_epoch=True)
         self.log('test_classification_loss', classification_loss, on_epoch=True)
         self.log('test_regression_loss', regression_loss, on_epoch=True)
@@ -461,16 +516,15 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.log('test_regression_rmse', rmse, on_epoch=True, prog_bar=True)
         self.log('final_classification_weight', weights[0], on_epoch=True)
         self.log('final_regression_weight', weights[1], on_epoch=True)
-        
         self.log('test_specificity', spec, on_epoch=True, prog_bar=True)
         self.log('test_sensitivity', sens, on_epoch=True, prog_bar=True)
+        
+        # Store for confusion matrix and MMSE visualizations
         self.test_predictions.append(preds.cpu())
         self.test_labels.append(label.cpu())
-        # self.loss_history['classification'].append(classification_loss.item())
-        # self.loss_history['regression'].append(regression_loss.item())
-        # self.loss_history['weights'].append(weights.tolist())
+        self.test_mmse_true.append(mmse.cpu())
+        self.test_mmse_pred.append(regression_output.squeeze().cpu())
 
-        
         return {
             'preds': preds,
             'true_labels': label,
@@ -480,38 +534,112 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             'specificity': spec,
             'sensitivity': sens
         }
+        
     def on_test_start(self):
-    # Clear previous predictions at the start of testing
         self.test_predictions = []
         self.test_labels = []
+        self.test_mmse_true = []
+        self.test_mmse_pred = []
+        self.num_AD = 0
+        self.num_CN = 0
+        self.num_MCI = 0
+        
     def on_test_end(self):
         print("============================================")
-        print(self.num_AD)
-        print(self.num_CN)
-        print(self.num_MCI)
+        print(f"Number of AD samples: {self.num_AD}")
+        print(f"Number of CN samples: {self.num_CN}")
+        print(f"Number of MCI samples: {self.num_MCI}")
         print("============================================")
-      
-        save_path = '/home/jupyter-iec_iot13_toanlm/multitask/visualize'
-        os.makedirs(save_path, exist_ok=True)
         
+        # Collect all test predictions and ground truths
         all_preds = torch.cat(self.test_predictions).numpy()
         all_labels = torch.cat(self.test_labels).numpy()
         
+        # MMSE predictions visualization
+        all_true_mmse = torch.cat(self.test_mmse_true).numpy()
+        all_pred_mmse = torch.cat(self.test_mmse_pred).numpy()
+        
+        # Class names for confusion matrix
         if hasattr(self, 'num_classes') and self.num_classes > 2:
             class_names = ["AD", "CN", "MCI"]
         else:
-            # class_names = ["AD", "CN"]
-            class_names = [ "CN","MCI"]
+            class_names = ["CN", "MCI"]
+            
+        # Create and log confusion matrix
+        self.plot_confusion_matrix(all_preds, all_labels, class_names)
+        
+        # Create and log MMSE prediction visualizations
+        self.plot_mmse_predictions(all_true_mmse, all_pred_mmse)
+        
+    def plot_confusion_matrix(self, predictions, labels, class_names):
+        """Plot and log confusion matrix to wandb"""
+        from sklearn.metrics import confusion_matrix
+        import seaborn as sns
+        
+        cm = confusion_matrix(labels, predictions)
         
         # Plot confusion matrix
-        plot_confusion_matrix(
-            y_true=all_labels,
-            y_pred=all_preds,
-            save_path=save_path,
-            classes=class_names
-        )
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                   xticklabels=class_names, yticklabels=class_names)
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.title('Confusion Matrix')
         
-        plot_and_save_optimization_metrics(self, save_path)
+        # Log to wandb
+        self.logger.experiment.log({"Confusion Matrix": wandb.Image(plt)})
+        plt.close()
+        
+    def plot_mmse_predictions(self, all_true_mmse, all_pred_mmse):
+        """Create and log MMSE prediction visualizations to wandb"""
+        
+        # 1. Scatter Plot: True vs Predicted MMSE
+        fig_scatter, ax_scatter = plt.subplots(figsize=(10, 6))
+        scatter = ax_scatter.scatter(all_true_mmse, all_pred_mmse, alpha=0.6)
+        ax_scatter.plot([min(all_true_mmse), max(all_true_mmse)], 
+                       [min(all_true_mmse), max(all_true_mmse)], 'r--')
+        ax_scatter.set_xlabel('True MMSE Score')
+        ax_scatter.set_ylabel('Predicted MMSE Score')
+        ax_scatter.set_title('MMSE Prediction: True vs Predicted')
+        ax_scatter.grid(True)
+        self.logger.experiment.log({"MMSE Scatter Plot": wandb.Image(fig_scatter)})
+        plt.close(fig_scatter)
+        
+        # 2. Residual Plot
+        residuals = all_pred_mmse - all_true_mmse
+        fig_residual, ax_residual = plt.subplots(figsize=(10, 6))
+        ax_residual.scatter(all_true_mmse, residuals, alpha=0.6)
+        ax_residual.axhline(y=0, color='r', linestyle='--')
+        ax_residual.set_xlabel('True MMSE Score')
+        ax_residual.set_ylabel('Residual (Predicted - True)')
+        ax_residual.set_title('MMSE Prediction Residuals')
+        ax_residual.grid(True)
+        self.logger.experiment.log({"MMSE Residual Plot": wandb.Image(fig_residual)})
+        plt.close(fig_residual)
+        
+        # 3. Distribution Plot
+        fig_dist, ax_dist = plt.subplots(figsize=(10, 6))
+        ax_dist.hist(all_true_mmse, bins=15, alpha=0.5, label='True MMSE')
+        ax_dist.hist(all_pred_mmse, bins=15, alpha=0.5, label='Predicted MMSE')
+        ax_dist.set_xlabel('MMSE Score')
+        ax_dist.set_ylabel('Frequency')
+        ax_dist.set_title('Distribution of True and Predicted MMSE Scores')
+        ax_dist.legend()
+        ax_dist.grid(True)
+        self.logger.experiment.log({"MMSE Distribution Plot": wandb.Image(fig_dist)})
+        plt.close(fig_dist)
+        
+        # 4. Additional metrics as a table
+        mmse_metrics = {
+            "MMSE MAE": float(F.l1_loss(torch.tensor(all_pred_mmse), torch.tensor(all_true_mmse))),
+            "MMSE RMSE": float(torch.sqrt(F.mse_loss(torch.tensor(all_pred_mmse), torch.tensor(all_true_mmse)))),
+            "MMSE Correlation": float(np.corrcoef(all_true_mmse, all_pred_mmse)[0, 1])
+        }
+        self.logger.experiment.log({"MMSE Metrics": wandb.Table(
+            data=[[k, v] for k, v in mmse_metrics.items()],
+            columns=["Metric", "Value"])
+        })
+
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -527,5 +655,3 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
                 'monitor': 'val_loss'
             }
         }
-# ==============================================================================
-   

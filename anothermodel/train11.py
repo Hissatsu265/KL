@@ -9,12 +9,12 @@ import wandb
 from pytorch_lightning.loggers import WandbLogger
 from multitask.visualize.gradcam3D import GradCAM3D, save_gradcam
 
-from multitask.anothermodel.model_frank import MultiTaskAlzheimerModel
-# from multitask.anothermodel.model import MultiTaskAlzheimerModel
-# from multitask.anothermodel.model_grad import MultiTaskAlzheimerModel
-# from multitask.anothermodel.model_gradfrank import MultiTaskAlzheimerModel
 
-# from multitask.resnet.proposefrank import MultiTaskAlzheimerModel
+
+from multitask.anothermodel.model_fix import MultiTaskAlzheimerModel
+from multitask.anothermodel.model_frank import MultiTaskAlzheimerModel
+from multitask.anothermodel.model_gradfrank import MultiTaskAlzheimerModel
+from multitask.anothermodel.model import MultiTaskAlzheimerModel
 
 import torch.nn.functional as F
 
@@ -128,12 +128,12 @@ def main(wandb_logger):
     print('AD: ',len(ad))
     print('CN: ',len(cn))
     # dataset_list = ad3y + mci3y + cn3y + ad1y + cn2y
-    dataset_list =cn+mci3y+ad
+    dataset_list =cn+mci3y+ad + cn+mci3y+ad+ cn+mci3y+ad 
     # dataset_list = dataset_list + mci3y  
     dataset=CustomDataset(dataset_list)
     # =====================================================
     batch_size = 16
-    max_epochs = 1
+    max_epochs = 100
     num_classes = 3
     input_shape = (1, 64, 64, 64) 
     
@@ -161,7 +161,7 @@ def main(wandb_logger):
     early_stop_callback = EarlyStopping(
         monitor='val_loss',
         min_delta=0.00,
-        patience=10,
+        patience=100,
         verbose=True,
         mode='min'
     )
@@ -189,16 +189,6 @@ def main(wandb_logger):
 # ============================================================
 if __name__ == '__main__':
     print('hi')
-    wandb.init(
-        project="model_compare",
-        config={
-            "architecture": "R3D_18",
-            "dataset": "ADNI",
-            "batch_size": 16,
-            "learning_rate": 1e-3,
-            "num_classes": 2,
-            "epochs": 100,
-        }
-    )
-    wandb_logger = WandbLogger(project="model_compare")
+  
+    wandb_logger = WandbLogger(project="model_compare_ver2")
     test_loader,model =main(wandb_logger)

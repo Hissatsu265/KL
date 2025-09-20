@@ -68,105 +68,126 @@ class GradNormOptimizer:
         normalized_weights = F.softmax(self.task_weights, dim=0)
         return normalized_weights
 
-class CombinedOptimizer:
-    def __init__(self, model, num_tasks=2, frank_wolfe_weight=0.5, alpha=1.5):
-        self.frank_wolfe = FrankWolfeOptimizer(num_tasks)
-        self.gradnorm = GradNormOptimizer(model, num_tasks, alpha)
-        self.frank_wolfe_weight = frank_wolfe_weight
-        self.weights = torch.ones(num_tasks) / num_tasks
-        self.device = None
-        
-    def to(self, device):
-        self.device = device
-        self.frank_wolfe.to(device)
-        self.gradnorm.to(device)
-        self.weights = self.weights.to(device)
-        return self
-        
-    def update_weights(self, losses, shared_params):
-        # Compute GradNorm weights first with retain_graph=True
-        gn_weights = self.gradnorm.update_weights(losses, shared_params)
-        
-        # Then compute Frank-Wolfe weights
-        fw_weights = self.frank_wolfe.update_weights(losses)
-        
-        # Combine weights
-        combined_weights = (self.frank_wolfe_weight * fw_weights + 
-                          (1 - self.frank_wolfe_weight) * gn_weights)
-        
-        # Extra weight for regression task
-        # combined_weights[1] *= 1.2
-        
-        # self.weights = F.softmax(combined_weights, dim=0)    
-        self.weights = combined_weights
-        return self.weights
 class FrankWolfeOptimizer:
-    def __init__(self, num_tasks=2, max_iter=10, beta=0.1):
+    def __init__(self, num_tasks=2):
         self.num_tasks = num_tasks
-        self.max_iter = max_iter
         self.weights = None
+        self.initial_losses = None  # Store L_0 for normalization
         self.device = None
-        self.beta = beta  # Parameter for gamma calculation
         self.iteration = 0
-        self.loss_history = []
         
     def to(self, device):
         self.device = device
         if self.weights is None:
+            # Initialize weights uniformly on simplex
             self.weights = (torch.ones(self.num_tasks) / self.num_tasks).to(device)
         else:
             self.weights = self.weights.to(device)
         return self
-        
-    def compute_gradient(self, losses, prev_weights):
-        # Formula 1: Enhanced gradient computation
-        # gi = 0.9 * log(1 + Li) + 0.1 * wi_prev
-        losses_tensor = torch.stack([loss.detach() for loss in losses])
-        log_losses = torch.log(1 + losses_tensor)
-        return 0.9 * log_losses + 0.1 * prev_weights
     
-    def compute_gamma(self, losses):
-        # Formula 2: Enhanced gamma computation
-        # γ = min(1, 2/(t+2)) * exp(-β * L_mean)
-        L_mean = torch.mean(torch.stack([loss.detach() for loss in losses]))
-        base_gamma = min(1.0, 2.0 / (self.iteration + 2))
-        return base_gamma * torch.exp(-self.beta * L_mean)
-    
-    def solve_linear_problem(self, gradients):
-        min_idx = torch.argmin(gradients)
-        s = torch.zeros_like(self.weights, device=self.device)
-        s[min_idx] = 1.0
-        return s
+    def set_initial_losses(self, initial_losses):
+        """Store initial losses L_0 for normalization"""
+        self.initial_losses = torch.stack([loss.detach().clone() for loss in initial_losses])
+        if self.device is not None:
+            self.initial_losses = self.initial_losses.to(self.device)
     
     def update_weights(self, losses):
         if self.weights is None:
             self.device = losses[0].device
             self.weights = (torch.ones(self.num_tasks) / self.num_tasks).to(self.device)
             
-        prev_weights = self.weights.clone()
+        # If initial losses not set, use current losses as initial
+        if self.initial_losses is None:
+            self.set_initial_losses(losses)
+            
+        # Step 1: Get raw losses
+        current_losses = torch.stack([loss.detach() for loss in losses])
         
-        # Compute enhanced gradient
-        gradients = self.compute_gradient(losses, prev_weights)
+        # Step 2: Normalize losses (avoid division by zero)
+        epsilon = 1e-8
+        normalized_losses = current_losses / (self.initial_losses + epsilon)
         
-        # Solve linear problem
-        s = self.solve_linear_problem(gradients)
+        # Step 3: Find direction s_k using NORMALIZED losses
+        # Choose task with highest normalized loss
+        max_loss_idx = torch.argmax(normalized_losses)
+        s_k = torch.zeros(self.num_tasks, device=self.device)
+        s_k[max_loss_idx] = 1.0
         
-        # Compute enhanced gamma
-        gamma = self.compute_gamma(losses)
+        # Step 4: Determine step size gamma
+        gamma = 2.0 / (self.iteration + 2.0)
         
-        # Formula 3: Enhanced weight update with logarithmic barrier
-        # w_new = (1 - γ) * w_prev + γ * log(1 + s)
-        log_barrier = torch.log(1 + s)
-        new_weights = (1 - gamma) * prev_weights + gamma * log_barrier
+        # Step 5: Update weights using Frank-Wolfe formula
+        # w_{k+1} = (1 - gamma) * w_k + gamma * s_k
+        self.weights = (1.0 - gamma) * self.weights + gamma * s_k
         
-        # Formula 4: Softmax normalization
-        self.weights = F.softmax(new_weights, dim=0)
+        # Optional: Ensure weights sum to 1 (should be automatic with Frank-Wolfe)
+        # But add for numerical stability
+        self.weights = self.weights / torch.sum(self.weights)
         
-        # Update iteration counter and store loss history
         self.iteration += 1
-        self.loss_history.append([loss.item() for loss in losses])
-        
         return self.weights
+
+class CombinedOptimizer:
+    """Pure Frank-Wolfe implementation"""
+    def __init__(self, model, num_tasks=2):
+        self.frank_wolfe = FrankWolfeOptimizer(num_tasks)
+        self.weights = torch.ones(num_tasks) / num_tasks
+        self.device = None
+        
+    def to(self, device):
+        self.device = device
+        self.frank_wolfe.to(device)
+        self.weights = self.weights.to(device)
+        return self
+    
+    def set_initial_losses(self, initial_losses):
+        """Set initial losses for Frank-Wolfe normalization"""
+        self.frank_wolfe.set_initial_losses(initial_losses)
+        
+    def update_weights(self, losses, shared_params=None):
+        # Only use Frank-Wolfe (ignore shared_params)
+        self.weights = self.frank_wolfe.update_weights(losses)
+        return self.weights
+
+# Example usage and testing
+def test_frank_wolfe():
+    """Test Frank-Wolfe with simulated losses"""
+    
+    # Initialize
+    num_tasks = 2
+    fw_optimizer = FrankWolfeOptimizer(num_tasks)
+    fw_optimizer.to(torch.device('cpu'))
+    
+    # Simulate initial losses
+    initial_losses = [torch.tensor(2.0), torch.tensor(1.0)]
+    fw_optimizer.set_initial_losses(initial_losses)
+    
+    print("Frank-Wolfe Test:")
+    print(f"Initial losses: {[l.item() for l in initial_losses]}")
+    print(f"Initial weights: {fw_optimizer.weights}")
+    print()
+    
+    # Simulate training iterations
+    scenarios = [
+        # Task 1 higher loss -> should get more weight
+        ([torch.tensor(3.0), torch.tensor(1.2)], "Task 1 struggling"),
+        ([torch.tensor(2.8), torch.tensor(1.1)], "Task 1 still higher"),
+        ([torch.tensor(1.5), torch.tensor(2.5)], "Task 2 now higher"),
+        ([torch.tensor(1.2), torch.tensor(2.0)], "Task 2 still higher"),
+        ([torch.tensor(1.1), torch.tensor(1.1)], "Tasks balanced"),
+    ]
+    
+    for losses, description in scenarios:
+        weights = fw_optimizer.update_weights(losses)
+        normalized_losses = [losses[i].item() / initial_losses[i].item() 
+                           for i in range(num_tasks)]
+        
+        print(f"Iteration {fw_optimizer.iteration}: {description}")
+        print(f"  Current losses: {[l.item() for l in losses]}")
+        print(f"  Normalized losses: {normalized_losses}")
+        print(f"  Updated weights: {weights.detach().numpy()}")
+        print(f"  Gamma: {2.0 / (fw_optimizer.iteration + 1.0):.3f}")
+        print()
 class AttentionGatingModule(nn.Module):
     def __init__(self, feature_dim):
         super(AttentionGatingModule, self).__init__()
@@ -285,9 +306,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
  
         self.classification_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
         self.regression_loss = nn.HuberLoss()
-        self.multi_task_optimizer = CombinedOptimizer(self, num_tasks=2, 
-                                            frank_wolfe_weight=0.4,  
-                                            alpha=1.5)
+        self.multi_task_optimizer = CombinedOptimizer(self, num_tasks=2)
 
         if num_classes>2:
             self.specificity = MulticlassSpecificity(num_classes=num_classes)

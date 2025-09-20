@@ -176,11 +176,16 @@ class CustomDataset:
         return len(self.data)
 def main(wandb_logger):
     print('start')
-    ad3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/ad3y_skull.pt'))  
-    mci3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/mci3y_skull.pt'))
-    cn3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/cn3y_skull.pt'))
-    ad1y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/ad1y_skull.pt'))
-    cn2y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/cn2y_skull.pt'))
+    # ad3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/ad3y_skull.pt'))  
+    # mci3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/mci3y_skull.pt'))
+    # cn3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/cn3y_skull.pt'))
+    # ad1y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/ad1y_skull.pt'))
+    # cn2y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/cn2y_skull.pt'))
+    ad3y = list(torch.load('/home/toan/KL_multitask_learning/data/ad3y_skull.pt'))  
+    mci3y = list(torch.load('/home/toan/KL_multitask_learning/data/mci3y_skull.pt'))
+    cn3y = list(torch.load('/home/toan/KL_multitask_learning/data/cn3y_skull.pt'))
+    ad1y = list(torch.load('/home/toan/KL_multitask_learning/data/ad1y_skull.pt'))
+    cn2y = list(torch.load('/home/toan/KL_multitask_learning/data/cn2y_skull.pt'))
     ad=ad3y+ad1y
     cn=cn2y+cn3y
     ad=ad[:560]

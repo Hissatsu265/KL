@@ -1,21 +1,24 @@
 import torch
+# import torch
+torch.set_float32_matmul_precision("medium")
+
 import numpy as np
 import random
 from multitask.multitaskdataset import MultitaskAlzheimerDataset
-from multitask.visualize.visualize import visualize_and_save_gradcam,plot_and_save_optimization_metrics
+# from multitask.visualize.visualize import visualize_and_save_gradcam,plot_and_save_optimization_metrics
 import torchvision.transforms as transforms
 import random
 import wandb
 from pytorch_lightning.loggers import WandbLogger
-from multitask.visualize.gradcam3D import GradCAM3D, save_gradcam
+# from multitask.visualize.gradcam3D import GradCAM3D, save_gradcam
 
 
 
-from multitask.anothermodel.model_fix import MultiTaskAlzheimerModel
-from multitask.anothermodel.model_frank import MultiTaskAlzheimerModel
-from multitask.anothermodel.model_gradfrank import MultiTaskAlzheimerModel
+# from multitask.anothermodel.model_fix import MultiTaskAlzheimerModel
+# from multitask.anothermodel.model_frank import MultiTaskAlzheimerModel
+# from multitask.anothermodel.model_gradfrank import MultiTaskAlzheimerModel
 from multitask.anothermodel.model import MultiTaskAlzheimerModel
-
+from multitask.anothermodel.frank import MultiTaskAlzheimerModel
 import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -27,7 +30,7 @@ from torch.nn.functional import cross_entropy
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 # =============================================================
-# export PYTHONPATH="${PYTHONPATH}:/home/jupyter-iec_iot13_toanlm/"
+# export PYTHONPATH="${PYTHONPATH}:/home/toan/"
 # =============================================================
 class RandomRotation3D:
     def __init__(self, degrees):
@@ -115,11 +118,11 @@ class CustomDataset:
         return len(self.data)
 def main(wandb_logger):
     print('start')
-    ad3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/ad3y_skull.pt'))  
-    mci3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/mci3y_skull.pt'))
-    cn3y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/cn3y_skull.pt'))
-    ad1y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/ad1y_skull.pt'))
-    cn2y = list(torch.load('/home/jupyter-iec_iot13_toanlm/multitask/data/data_skull_v1/cn2y_skull.pt'))
+    ad3y = list(torch.load('/home/toan/multitask/data/ad3y_skull.pt', weights_only=False))  
+    mci3y = list(torch.load('/home/toan/multitask/data/mci3y_skull.pt', weights_only=False))
+    cn3y = list(torch.load('/home/toan/multitask/data/cn3y_skull.pt', weights_only=False))
+    ad1y = list(torch.load('/home/toan/multitask/data/ad1y_skull.pt', weights_only=False))
+    cn2y = list(torch.load('/home/toan/multitask/data/cn2y_skull.pt', weights_only=False))
     ad=ad3y+ad1y
     cn=cn2y+cn3y
     ad=ad[:560]
@@ -170,11 +173,11 @@ def main(wandb_logger):
         max_epochs=max_epochs,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         # accelerator='cpu'
-        # devices=[1],  
-        devices=2,
-        strategy='ddp',
+        devices=1,  
+        # devices=2,
+        # strategy='ddp',
         callbacks=[checkpoint_callback, early_stop_callback],
-        logger=wandb_logger,
+        # logger=wandb_logger,
         deterministic=False
     )
     trainer.fit(
@@ -183,12 +186,13 @@ def main(wandb_logger):
         val_dataloaders=val_loader,
     )
     trainer.test(model, dataloaders=test_loader)
-    wandb.finish()
+    # wandb.finish()
     return test_loader,model
 
 # ============================================================
 if __name__ == '__main__':
     print('hi')
   
-    wandb_logger = WandbLogger(project="model_compare_ver2")
+    # wandb_logger = WandbLogger(project="model_compare_ver2")
+    wandb_logger=""
     test_loader,model =main(wandb_logger)

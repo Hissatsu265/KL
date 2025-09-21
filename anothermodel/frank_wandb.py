@@ -418,7 +418,20 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.log('train_regression_weight', weights[1], on_step=True, on_epoch=True)
         
         return total_loss
-    
+    def log_training_metrics(self, total_loss, classification_loss, regression_loss, acc, weights, grad_norm_class, grad_norm_reg):
+        """Enhanced wandb logging for training metrics"""
+        wandb.log({
+            "train/total_loss": total_loss.item(),
+            "train/classification_loss": classification_loss.item(),
+            "train/regression_loss": regression_loss.item(),
+            "train/accuracy": acc.item(),
+            "train/classification_weight": weights[0].item(),
+            "train/regression_weight": weights[1].item(),
+            "train/grad_norm_classification": grad_norm_class.item(),
+            "train/grad_norm_regression": grad_norm_reg.item(),
+            "train/weight_ratio": (weights[0] / weights[1]).item(),
+            "global_step": self.current_step
+        })
     def on_train_epoch_end(self):
         # Store loss values at the end of each epoch for plotting
         self.loss_history['epochs'].append(self.current_epoch_idx)
@@ -466,7 +479,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
             ax.grid(True)
             
             # Log to wandb
-            # self.logger.experiment.log({"Training Loss Curves": wandb.Image(fig)})
+            self.logger.experiment.log({"Training Loss Curves": wandb.Image(fig)})
         
         plt.close(fig)
 
@@ -494,7 +507,14 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         self.log('val_classification_acc', acc, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log('val_classification_weight', weights[0], on_epoch=True, sync_dist=True)
         self.log('val_regression_weight', weights[1], on_epoch=True, sync_dist=True)
-        
+        wandb.log({
+            "val/total_loss": total_loss.item(),
+            "val/classification_loss": classification_loss.item(),
+            "val/regression_loss": regression_loss.item(),
+            "val/accuracy": acc.item(),
+            "epoch": self.current_epoch_idx
+        })
+
         return total_loss
 
     def test_step(self, batch, batch_idx):
@@ -599,7 +619,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         ax_scatter.set_ylabel('Predicted MMSE Score')
         ax_scatter.set_title('MMSE Prediction: True vs Predicted')
         ax_scatter.grid(True)
-        # self.logger.experiment.log({"MMSE Scatter Plot": wandb.Image(fig_scatter)})
+        self.logger.experiment.log({"MMSE Scatter Plot": wandb.Image(fig_scatter)})
         plt.close(fig_scatter)
         
         # 2. Residual Plot
@@ -611,7 +631,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         ax_residual.set_ylabel('Residual (Predicted - True)')
         ax_residual.set_title('MMSE Prediction Residuals')
         ax_residual.grid(True)
-        # self.logger.experiment.log({"MMSE Residual Plot": wandb.Image(fig_residual)})
+        self.logger.experiment.log({"MMSE Residual Plot": wandb.Image(fig_residual)})
         plt.close(fig_residual)
         
         # 3. Distribution Plot
@@ -623,7 +643,7 @@ class MultiTaskAlzheimerModel(pl.LightningModule):
         ax_dist.set_title('Distribution of True and Predicted MMSE Scores')
         ax_dist.legend()
         ax_dist.grid(True)
-        # self.logger.experiment.log({"MMSE Distribution Plot": wandb.Image(fig_dist)})
+        self.logger.experiment.log({"MMSE Distribution Plot": wandb.Image(fig_dist)})
         plt.close(fig_dist)
         
         # 4. Additional metrics as a table

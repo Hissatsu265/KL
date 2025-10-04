@@ -30,7 +30,7 @@
 # from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 # from pytorch_lightning.loggers import TensorBoardLogger
 # # =============================================================
-# # export PYTHONPATH="${PYTHONPATH}:/root/"
+# # export PYTHONPATH="${PYTHONPATH}:/home/toan/"
 # # =============================================================
 # class RandomRotation3D:
 #     def __init__(self, degrees):
@@ -198,7 +198,7 @@
 #     test_loader,model =main(wandb_logger)
 # Sửa đổi file main (train.py hoặc main.py)
 import torch
-# torch.set_float32_matmul_precision("medium")
+torch.set_float32_matmul_precision("medium")
 
 import numpy as np
 import random
@@ -208,12 +208,14 @@ import random
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 import matplotlib.pyplot as plt
-import seaborn as sns
+# import seaborn as sns
 from sklearn.metrics import confusion_matrix, classification_report
 
 # Import model classes (giữ nguyên như code gốc)
 from multitask.anothermodel.model import MultiTaskAlzheimerModel
 from multitask.anothermodel.frank_wandb import MultiTaskAlzheimerModel
+# from multitask.anothermodel.grad_wandb import MultiTaskAlzheimerModel
+from multitask.anothermodel.combine import MultiTaskAlzheimerModel
 import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -386,11 +388,11 @@ def main(config=None):
     config = wandb.config
     
     print('Loading data...')
-    ad3y = list(torch.load('/root/multitask/data/ad3y_skull.pt', weights_only=False))  
-    mci3y = list(torch.load('/root/multitask/data/mci3y_skull.pt', weights_only=False))
-    cn3y = list(torch.load('/root/multitask/data/cn3y_skull.pt', weights_only=False))
-    ad1y = list(torch.load('/root/multitask/data/ad1y_skull.pt', weights_only=False))
-    cn2y = list(torch.load('/root/multitask/data/cn2y_skull.pt', weights_only=False))
+    ad3y = list(torch.load('/home/toan/multitask/data/ad3y_skull.pt', weights_only=False))  
+    mci3y = list(torch.load('/home/toan/multitask/data/mci3y_skull.pt', weights_only=False))
+    cn3y = list(torch.load('/home/toan/multitask/data/cn3y_skull.pt', weights_only=False))
+    ad1y = list(torch.load('/home/toan/multitask/data/ad1y_skull.pt', weights_only=False))
+    cn2y = list(torch.load('/home/toan/multitask/data/cn2y_skull.pt', weights_only=False))
     
     ad = ad3y + ad1y
     cn = cn2y + cn3y
